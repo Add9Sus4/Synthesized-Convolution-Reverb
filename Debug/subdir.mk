@@ -8,6 +8,7 @@ C_SRCS += \
 ../convolve.c \
 ../dawsonaudio.c \
 ../fft.c \
+../impulse.c \
 ../vector.c 
 
 OBJS += \
@@ -15,6 +16,7 @@ OBJS += \
 ./convolve.o \
 ./dawsonaudio.o \
 ./fft.o \
+./impulse.o \
 ./vector.o 
 
 C_DEPS += \
@@ -22,6 +24,7 @@ C_DEPS += \
 ./convolve.d \
 ./dawsonaudio.d \
 ./fft.d \
+./impulse.d \
 ./vector.d 
 
 
