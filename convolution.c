@@ -102,8 +102,17 @@ void *calculateFFT(void *incomingFFTArgs) {
 
 	int i;
 
-	int counter_target = (fftArgs->counter + fftArgs->num_callbacks_to_complete
-			- 1) % g_max_factor;
+	int multiplier = 1;
+
+	if (fftArgs->impulse_block_number % 2 != 0) {
+		multiplier = 1;
+	} else {
+		multiplier = 2;
+	}
+
+	int counter_target = (fftArgs->counter
+			+ fftArgs->num_callbacks_to_complete * multiplier - 1)
+			% g_max_factor;
 	if (counter_target == 0) {
 		counter_target = 512;
 	}
@@ -168,13 +177,10 @@ void *calculateFFT(void *incomingFFTArgs) {
 //			maxY = fabsf(convResult[i].Re);
 //		}
 //	}
-
 //	printf("maxY = %f\n", maxY);
-
 	// 8. When the appropriate number of callback cycles have passed (num_callbacks_to_complete), put
 	//    the real values of the buffer created in part 5 into the g_output_storage_buffer
 	//    (sample 0 through sample 2 * (last_sample_index - first_sample_index)
-
 	while (g_counter != counter_target) {
 		nanosleep((const struct timespec[] ) { {0,g_block_duration_in_nanoseconds/2}}, NULL);
 	}
@@ -227,11 +233,11 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 
 	++g_counter;
 
-//	printf("N = %d\n", ++g_counter);
-
-	if (g_counter == g_max_factor + 1) {
+	if (g_counter >= g_max_factor + 1) {
 		g_counter = 1;
 	}
+
+//	printf("N = %d\n", g_counter);
 
 	int i, j;
 
@@ -406,7 +412,7 @@ void loadImpulse() {
 //	}
 	Vector blockLengthVector = determineBlockLengths(impulse);
 	BlockData* data_ptr = allocateBlockBuffers(blockLengthVector);
-	partitionImpulseIntoBlocks(blockLengthVector,data_ptr,impulse);
+	partitionImpulseIntoBlocks(blockLengthVector, data_ptr, impulse);
 	g_fftData_ptr = allocateFFTBuffers(data_ptr, blockLengthVector);
 	g_inputAudioData_ptr = allocateInputAudioBuffers(blockLengthVector);
 //	printPartitionedImpulseData(blockLengthVector, data_ptr);
@@ -427,8 +433,6 @@ int main(int argc, char **argv) {
 			g_block_duration_in_nanoseconds);
 
 	loadImpulse();
-
-
 
 	initializeGlobalParameters();
 
