@@ -43,8 +43,8 @@ BlockData *allocateBlockBuffers(Vector vector) {
 	data_ptr->size = vector.size;
 	int i;
 	for (i = 0; i < vector.size; i++) {
-		data_ptr->audioBlocks[i] = (float*) malloc(
-				sizeof(float) * vector_get(&vector, i));
+		data_ptr->audioBlocks[i] = (float*) calloc(vector_get(&vector, i),
+				sizeof(float));
 //		printf("Block length[%d]: %d\n", i, vector_get(&vector, i));
 	}
 
@@ -58,13 +58,18 @@ void partitionImpulseIntoBlocks(Vector vector, BlockData* data_ptr,
 	// For each block
 	for (blockNumber = 0; blockNumber < vector.size; blockNumber++) {
 		// Copy the appropriate samples from the impulse
-		for (sampleIndex = 0; sampleIndex < vector_get(&vector, blockNumber);
+		for (sampleIndex = 0;
+				sampleIndex < vector_get(&vector, blockNumber) / 2;
 				sampleIndex++) {
 			data_ptr->audioBlocks[blockNumber][sampleIndex] =
 					impulse->buffer[sampleIndex + offset];
+//			printf("data_ptr->audioBlocks[%d][%d] = %f, impulse->buffer[%d]\n",
+//					blockNumber, sampleIndex,
+//					impulse->buffer[sampleIndex + offset],
+//					(sampleIndex + offset));
 		}
 		// Increase the offset by the size of the last block added
-		offset += vector_get(&vector, blockNumber);
+		offset += vector_get(&vector, blockNumber)/2;
 	}
 }
 

@@ -10,6 +10,8 @@
 
 typedef struct{float Re; float Im;} complex;
 
+complex complex_mult(complex a, complex b);
+
 void fft(complex *v, int n, complex *tmp);
 
 void ifft(complex *v, int n, complex *tmp);
