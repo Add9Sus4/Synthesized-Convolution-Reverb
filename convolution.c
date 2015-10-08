@@ -5,10 +5,6 @@
  *      Author: Dawson
  */
 
-#define SAMPLE_RATE						44100
-#define MONO							1
-#define STEREO							2
-#define MIN_FFT_BLOCK_SIZE				128
 #define NANOSECONDS_IN_A_SECOND			1000000000
 
 #include <stdlib.h>
@@ -110,21 +106,17 @@ void *calculateFFT(void *incomingFFTArgs) {
 		multiplier = 2;
 	}
 
-	int counter_target = (fftArgs->counter
-			+ fftArgs->num_callbacks_to_complete * multiplier - 1)
-			% g_max_factor;
+	int numCyclesToWait = fftArgs->num_callbacks_to_complete * multiplier - 1;
+
+	int counter_target = (fftArgs->counter + numCyclesToWait)
+			% (g_max_factor * 2);
 	if (counter_target == 0) {
-		counter_target = 512;
+		counter_target = g_max_factor * 2;
 	}
 
-//	printf(
-//			"Start convolving block %d to %d (sample %d to %d) with h%d. This process will take %d cycles and complete when N = %d.\n",
-//			(fftArgs->counter - fftArgs->num_callbacks_to_complete),
-//			fftArgs->counter,
-//			(1 + g_end_sample
-//					- g_block_length * fftArgs->num_callbacks_to_complete),
-//			g_end_sample, fftArgs->impulse_block_number,
-//			fftArgs->num_callbacks_to_complete, counter_target);
+//	printf("waiting for %d cycles to complete.\n", fftArgs->num_callbacks_to_complete * multiplier);
+
+//	printf("counter_target: %d\n", counter_target);
 
 	pthread_detach(pthread_self());
 
@@ -143,6 +135,12 @@ void *calculateFFT(void *incomingFFTArgs) {
 		inputAudio[i].Re = g_input_storage_buffer[fftArgs->first_sample_index
 				+ i];
 	}
+
+	printf(
+			"Thread %d: Start convolving sample %d to %d with h%d. This process will take %d cycles and complete when N = %d.\n",
+			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
+			fftArgs->impulse_block_number, numCyclesToWait, counter_target);
+
 //	printf("Thread has acquired its samples\n");
 	// 3. Take the FFT of the buffer created in part 1.
 	complex *temp = calloc(convLength, sizeof(complex));
@@ -162,6 +160,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 //		printf("fftBlocks[%d][%d].Re = %f\n", fftBlockNumber, i, g_fftData_ptr->fftBlocks[fftBlockNumber][i]);
 		c = complex_mult(inputAudio[i],
 				g_fftData_ptr->fftBlocks[fftBlockNumber][i]);
+
 		convResult[i].Re = c.Re;
 		convResult[i].Im = c.Im;
 //		printf("convResult[%d].Re = %f\n", i, convResult[i].Re);
@@ -185,21 +184,19 @@ void *calculateFFT(void *incomingFFTArgs) {
 		nanosleep((const struct timespec[] ) { {0,g_block_duration_in_nanoseconds/2}}, NULL);
 	}
 
-	if (counter_target == g_counter) {
-//		printf(
-//				"The result of the convolution of block %d to %d (sample %d to %d) with h%d is being added to the output buffer. Expected arrival: when n = %d.\n",
-//				(fftArgs->counter - fftArgs->num_callbacks_to_complete),
-//				fftArgs->counter,
-//				(1 + g_end_sample
-//						- g_block_length * fftArgs->num_callbacks_to_complete),
-//				g_end_sample, fftArgs->impulse_block_number, counter_target);
-		// Put data in output buffer
-		for (i = 0; i < convLength; i++) {
-			g_output_storage_buffer[i] += convResult[i].Re;
-//			printf("g_output_storage_buffer[%d]: %f\n", i, g_output_storage_buffer[i]);
-		}
+//		printf("\n\n\nDATA:\n\n\n");
 
+	// Put data in output buffer
+	for (i = 0; i < convLength; i++) {
+//			printf("convResult[%d].Re: %f\n", i, convResult[i].Re);
+		g_output_storage_buffer[i] += convResult[i].Re;
+		//			printf("g_output_storage_buffer[%d]: %f\n", i, g_output_storage_buffer[i]);
 	}
+
+	printf(
+			"Thread %d: The result of the convolution of sample %d to %d with h%d has been added to the output buffer. Expected arrival: when n = %d.\n",
+			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
+			fftArgs->impulse_block_number, counter_target);
 
 	// Free all buffers
 	free(temp);
@@ -231,43 +228,46 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 		unsigned long framesPerBuffer, const PaStreamCallbackTimeInfo* timeInfo,
 		PaStreamCallbackFlags statusFlags, void *userData) {
 
-	++g_counter;
-
-	if (g_counter >= g_max_factor + 1) {
-		g_counter = 1;
-	}
-
-//	printf("N = %d\n", g_counter);
+	float *inBuf = (float*) inputBuffer;
+	float *outBuf = (float*) outputBuffer;
 
 	int i, j;
 
-	float *inBuf = (float*) inputBuffer;
-	float *outBuf = (float*) outputBuffer;
+	for (i = 0; i < framesPerBuffer; i++) {
+//		printf("outBuf[%d]: %f\n", i, outBuf[i]);
+		outBuf[i] = g_output_storage_buffer[i];
+	}
+
+	++g_counter;
+
+	if (g_counter >= g_max_factor * 2 + 1) {
+		g_counter = 1;
+	}
+
+	printf("N = %d\n", g_counter);
+
 	// 1. Shift both input and output audio buffers
+
 	// Shift g_input_storage_buffer to the left by g_block_length
 	for (i = 0; i < g_input_storage_buffer_length - g_block_length; i++) {
 		g_input_storage_buffer[i] = g_input_storage_buffer[i + g_block_length];
-	}
-
-	// Shift g_output_storage_buffer
-	for (i = 0; i < g_output_storage_buffer_length - g_block_length; i++) {
-		g_output_storage_buffer[i] =
-				g_output_storage_buffer[i + g_block_length];
 	}
 
 	// 2. Copy input audio to g_input_storage_buffer
 	// Fill right-most portion of g_input_storage_buffer with most recent audio
 	for (i = 0; i < g_block_length; i++) {
 		g_input_storage_buffer[g_input_storage_buffer_length - g_block_length
-				+ i] = inBuf[i] * 0.000001f;
+				+ i] = inBuf[i] * 0.00001f;
 	}
 
 	// 3. Create all new threads
 	/*
 	 * This will be replaced eventually by code which actually performs the convolution
 	 */
-	for (j = 0; j < g_powerOf2Vector.size; j++) {
+	for (j = 0; j < 1; j++) {
+//	for (j = 0; j < g_powerOf2Vector.size; j++) {
 		int factor = vector_get(&g_powerOf2Vector, j);
+//		printf("factor: %d\n", factor);
 		if (g_counter % factor == 0 && g_counter != 0) {
 
 			/*
@@ -288,7 +288,9 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 			fftArgs->impulse_block_number = (j * 2 + 1);
 			fftArgs->num_callbacks_to_complete = factor;
 			fftArgs->counter = g_counter;
-			pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs);
+//			if (j == 6) {
+				pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs);
+//			}
 
 //			printf(
 //					"Start convolving block %d to %d (sample %d to %d) with h%d\n",
@@ -302,7 +304,10 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 			fftArgs2->impulse_block_number = (j * 2 + 2);
 			fftArgs2->num_callbacks_to_complete = factor;
 			fftArgs2->counter = g_counter;
-			pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs2);
+
+//			if (j == 5) {
+				pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs2);
+//			}
 
 		}
 	}
@@ -314,9 +319,6 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 	// this must also happen before a new portaudio callback cycle begins
 
 	// 6. Audio copied from g_output_audio_buffer to outBuf
-	for (i = 0; i < framesPerBuffer; i++) {
-		outBuf[i] = g_output_storage_buffer[i];
-	}
 
 	// FFT of block
 //	{
@@ -337,6 +339,12 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 //		free(signal);
 //		free(temp);
 //	}
+
+	// Shift g_output_storage_buffer
+	for (i = 0; i < g_output_storage_buffer_length - g_block_length; i++) {
+		g_output_storage_buffer[i] =
+				g_output_storage_buffer[i + g_block_length];
+	}
 
 	// Get audio from g_input_storage_buffer
 //	for (i = 0; i < g_block_length; i++) {
@@ -371,6 +379,16 @@ void runPortAudio() {
 	/* Open audio stream */
 	err = Pa_OpenStream(&stream, &inputParameters, &outputParameters,
 	SAMPLE_RATE, MIN_FFT_BLOCK_SIZE, paNoFlag, paCallback, NULL);
+
+	printf("\nPa buffer size: %d\n", MIN_FFT_BLOCK_SIZE);
+	printf("g_input_storage_buffer size: %d\n", g_input_storage_buffer_length);
+	printf("g_output_storage_buffer size: %d\n",
+			g_output_storage_buffer_length);
+	printf("g_num_blocks: %d\n", g_num_blocks);
+	printf("g_block_length: %d\n", g_block_length);
+	printf("g_max_factor: %d\n", g_max_factor);
+	printf("g_impulse_length: %d\n\n", g_impulse_length);
+
 	if (err != paNoError) {
 		printf("PortAudio error: open stream: %s\n", Pa_GetErrorText(err));
 	}
@@ -404,6 +422,7 @@ void runPortAudio() {
 
 void loadImpulse() {
 	audioData* impulse = fileToBuffer("churchIR.wav");
+	printf("impulse length before zero-padding: %d\n", impulse->numFrames);
 	impulse = zeroPadToNextPowerOfTwo(impulse);
 	g_impulse_length = impulse->numFrames;
 //	int i;
@@ -417,6 +436,23 @@ void loadImpulse() {
 	g_inputAudioData_ptr = allocateInputAudioBuffers(blockLengthVector);
 //	printPartitionedImpulseData(blockLengthVector, data_ptr);
 //	printPartitionedImpulseFFTData(blockLengthVector,data_ptr);
+
+	// This part below tests that the impulse is broken up correctly
+
+//	int i,j;
+//
+//	for (i=0; i<data_ptr->size; i++) {
+//
+////
+//		float *data = (float *) malloc(sizeof(float) * blockLengthVector.data[i]);
+//
+//
+//		char fileName[15];
+//
+//		sprintf(fileName, "file%d.wav", i);
+//
+//		writeWavFile(data_ptr->audioBlocks[i],44100,1,blockLengthVector.data[i],1,fileName);
+//	}
 }
 
 void initializePowerOf2Vector() {
