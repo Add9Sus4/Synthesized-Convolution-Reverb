@@ -98,15 +98,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 
 	int i;
 
-	int multiplier = 1;
-
-	if (fftArgs->impulse_block_number % 2 != 0) {
-		multiplier = 1;
-	} else {
-		multiplier = 2;
-	}
-
-	int numCyclesToWait = fftArgs->num_callbacks_to_complete * multiplier - 1;
+	int numCyclesToWait = fftArgs->num_callbacks_to_complete - 1;
 
 	int counter_target = (fftArgs->counter + numCyclesToWait)
 			% (g_max_factor * 2);
@@ -127,6 +119,9 @@ void *calculateFFT(void *incomingFFTArgs) {
 	int blockLength = fftArgs->last_sample_index - fftArgs->first_sample_index
 			+ 1;
 	int convLength = blockLength * 2;
+
+	int volumeFactor = blockLength/g_block_length; // 1, 2, 4, 8, etc
+
 //	printf("convLength: %d\n", convLength);
 	complex *inputAudio = calloc(convLength, sizeof(complex));
 	// 2. Take audio from g_input_storage_buffer (first_sample_index to last_sample_index)
@@ -139,7 +134,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 	printf(
 			"Thread %d: Start convolving sample %d to %d with h%d. This process will take %d cycles and complete when N = %d.\n",
 			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
-			fftArgs->impulse_block_number, numCyclesToWait, counter_target);
+			fftArgs->impulse_block_number, numCyclesToWait + 1, counter_target);
 
 //	printf("Thread has acquired its samples\n");
 	// 3. Take the FFT of the buffer created in part 1.
@@ -189,7 +184,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 	// Put data in output buffer
 	for (i = 0; i < convLength; i++) {
 //			printf("convResult[%d].Re: %f\n", i, convResult[i].Re);
-		g_output_storage_buffer[i] += convResult[i].Re;
+		g_output_storage_buffer[i] += convResult[i].Re/volumeFactor;
 		//			printf("g_output_storage_buffer[%d]: %f\n", i, g_output_storage_buffer[i]);
 	}
 
@@ -264,8 +259,8 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 	/*
 	 * This will be replaced eventually by code which actually performs the convolution
 	 */
-	for (j = 0; j < 1; j++) {
-//	for (j = 0; j < g_powerOf2Vector.size; j++) {
+//	for (j = 0; j < 1; j++) {
+	for (j = 0; j < g_powerOf2Vector.size; j++) {
 		int factor = vector_get(&g_powerOf2Vector, j);
 //		printf("factor: %d\n", factor);
 		if (g_counter % factor == 0 && g_counter != 0) {
@@ -302,7 +297,7 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 					- g_block_length * factor);
 			fftArgs2->last_sample_index = g_end_sample;
 			fftArgs2->impulse_block_number = (j * 2 + 2);
-			fftArgs2->num_callbacks_to_complete = factor;
+			fftArgs2->num_callbacks_to_complete = factor * 2;
 			fftArgs2->counter = g_counter;
 
 //			if (j == 5) {
