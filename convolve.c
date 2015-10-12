@@ -24,15 +24,6 @@
 #define PI 3.14159265358979323846264338327950288
 #endif
 
-/* Print a vector of complexes as ordered pairs. */
-static void print_vector(const char *title, complex *x, int n)
-{
-    int i;
-    printf("%s (dim=%d):", title, n);
-    for(i=0; i<n; i++ ) printf(" %5.2f,%5.2f ", x[i].Re,x[i].Im);
-    putchar('\n');
-    return;
-}
 
 /* Multiply two complex numbers */
 complex complex_mult(complex a, complex b)

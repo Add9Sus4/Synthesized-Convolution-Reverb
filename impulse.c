@@ -24,6 +24,61 @@
 #include "vector.h"
 #include "impulse.h"
 
+bool isEmpty(complex *buffer, int size) {
+
+	int i;
+
+	for (i=0; i<size; i++) {
+		if (buffer[i].Re != 0.0f || buffer[i].Im != 0.0f) {
+			return FALSE;
+		}
+	}
+
+	return TRUE;
+}
+
+InputAudioData *allocateInputAudioDataBuffers(Vector vector) {
+
+	InputAudioData *audioData_ptr = (InputAudioData *) malloc(sizeof(InputAudioData));
+
+	audioData_ptr->size = vector.size;
+
+	audioData_ptr->inputAudioBlocks1 = (complex **) malloc(sizeof(complex *) * vector.size);
+	audioData_ptr->inputAudioBlocks1_extra = (complex **) malloc(sizeof(complex *) * vector.size);
+
+	int i;
+	for (i=0; i<vector.size; i++) {
+		audioData_ptr->inputAudioBlocks1[i] = (complex *) calloc(vector_get(&vector, i), sizeof(complex));
+		audioData_ptr->inputAudioBlocks1_extra[i] = (complex *) calloc(vector_get(&vector, i), sizeof(complex));
+	}
+
+	return audioData_ptr;
+}
+
+ConvResultData *allocateConvResultDataBuffers(Vector vector) {
+
+	ConvResultData *convData_ptr = (ConvResultData *) malloc(sizeof(ConvResultData));
+
+	convData_ptr->size = vector.size;
+
+	convData_ptr->convResultBlocks1 = (complex **) malloc(sizeof(complex *) * vector.size);
+	convData_ptr->convResultBlocks1_extra = (complex **) malloc(sizeof(complex *) * vector.size);
+
+	convData_ptr->convResultBlocks2 = (complex **) malloc(sizeof(complex *) * vector.size);
+	convData_ptr->convResultBlocks2_extra = (complex **) malloc(sizeof(complex *) * vector.size);
+
+	int i;
+	for (i=0; i<vector.size; i++) {
+		convData_ptr->convResultBlocks1[i] = (complex *) calloc(vector_get(&vector, i), sizeof(complex));
+		convData_ptr->convResultBlocks1_extra[i] = (complex *) calloc(vector_get(&vector, i), sizeof(complex));
+		convData_ptr->convResultBlocks2[i] = (complex *) calloc(vector_get(&vector, i), sizeof(complex));
+		convData_ptr->convResultBlocks2_extra[i] = (complex *) calloc(vector_get(&vector, i), sizeof(complex));
+	}
+
+	return convData_ptr;
+
+}
+
 BlockData *allocateBlockBuffers(Vector vector, audioData *impulse) {
 
 	BlockData* data_ptr = (BlockData*) malloc(sizeof(BlockData));

@@ -13,7 +13,6 @@
 #define STEREO				2
 #define MIN_FFT_BLOCK_SIZE	128
 
-
 typedef struct BlockData {
 	float **audioBlocks1;
 	float **audioBlocks2;
@@ -25,6 +24,33 @@ typedef struct FFTData {
 	complex **fftBlocks2;
 	int size;
 } FFTData;
+
+typedef struct InputAudioData {
+
+	complex **inputAudioBlocks1;
+	complex **inputAudioBlocks1_extra;
+
+	int size;
+
+} InputAudioData;
+
+typedef struct ConvResultData {
+
+	complex **convResultBlocks1;
+	complex **convResultBlocks1_extra;
+
+	complex **convResultBlocks2;
+	complex **convResultBlocks2_extra;
+
+	int size;
+
+} ConvResultData;
+
+bool isEmpty(complex *buffer, int size);
+
+InputAudioData *allocateInputAudioDataBuffers(Vector vector);
+
+ConvResultData *allocateConvResultDataBuffers(Vector vector);
 
 BlockData *allocateBlockBuffers(Vector vector, audioData *impulse);
 
