@@ -11,38 +11,27 @@
 #define SAMPLE_RATE			44100
 #define MONO				1
 #define STEREO				2
-#define MIN_FFT_BLOCK_SIZE	512
+#define MIN_FFT_BLOCK_SIZE	128
 
 
 typedef struct BlockData {
-	float **audioBlocks;
+	float **audioBlocks1;
+	float **audioBlocks2;
 	int size;
 } BlockData;
 
 typedef struct FFTData {
-	complex **fftBlocks;
+	complex **fftBlocks1;
+	complex **fftBlocks2;
 	int size;
 } FFTData;
 
-typedef struct InputAudioData {
-	float **audioBlocks;
-	int size;
-} InputAudioData;
-
-InputAudioData *allocateInputAudioBuffers(Vector vector);
-
-BlockData *allocateBlockBuffers(Vector vector);
+BlockData *allocateBlockBuffers(Vector vector, audioData *impulse);
 
 void partitionImpulseIntoBlocks(Vector vector, BlockData* data_ptr,
 		audioData* impulse);
 
-void printPartitionedImpulseData(Vector vector, BlockData* data_ptr);
-
-void printPartitionedImpulseFFTData(Vector vector, FFTData* fftData_ptr);
-
-void recombineBlocks(int length, Vector vector, BlockData* data_ptr);
-
-FFTData* allocateFFTBuffers(BlockData* data_ptr, Vector vector);
+FFTData* allocateFFTBuffers(BlockData* data_ptr, Vector vector, audioData *impulse);
 
 Vector determineBlockLengths(audioData* impulse);
 

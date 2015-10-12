@@ -8,6 +8,9 @@
 #ifndef DAWSONAUDIO_H_
 #define DAWSONAUDIO_H_
 
+#define MONO				1
+#define STEREO				2
+
 // Struct for audio data
 typedef struct audioData {
 
@@ -15,7 +18,8 @@ typedef struct audioData {
 	int numFrames;
 	int sampleRate;
 	char *fileName;
-	float *buffer;
+	float *buffer1;
+	float *buffer2;
 
 } audioData;
 
