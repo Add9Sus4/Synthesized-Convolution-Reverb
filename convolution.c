@@ -9,6 +9,7 @@
 #define NUM_CHECKS_PER_CYCLE			2
 #define FFT_SIZE MIN_FFT_BLOCK_SIZE
 #define SMOOTHING_AMT	4
+#define HALF_FFT_SIZE FFT_SIZE/2
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -57,8 +58,12 @@ GLfloat g_inc_y = 0.0f;
 GLfloat g_inc_x = 0.0f;
 GLfloat g_linewidth = 1.0f;
 
-float top_vals[FFT_SIZE];
-float bottom_vals[FFT_SIZE];
+float top_vals[HALF_FFT_SIZE];
+float bottom_vals[HALF_FFT_SIZE];
+
+float starting_vals[HALF_FFT_SIZE];
+
+float g_max = 0.0f;
 
 unsigned int g_channels = MONO;
 
@@ -202,8 +207,8 @@ void keyboardFunc(unsigned char key, int x, int y) {
 }
 
 void passiveMotionFunc(int x, int y) {
-	g_mouse_x = ((float) FFT_SIZE / 576) * (float) x
-			- ((float) FFT_SIZE * 111 / 576);
+	g_mouse_x = ((float) HALF_FFT_SIZE / 576) * (float) x
+			- ((float) HALF_FFT_SIZE * 111 / 576);
 
 	g_mouse_y = -4.14 + 8.28 * ((float) (g_height - y) / (float) g_height);
 
@@ -305,7 +310,7 @@ void displayFunc() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	// draw view here
-	if ((int) g_mouse_x >= 0 && (int) g_mouse_x < FFT_SIZE && a_pressed == true) {
+	if ((int) g_mouse_x >= 0 && (int) g_mouse_x < HALF_FFT_SIZE && a_pressed == true) {
 		float value = g_mouse_y - g_height_top;
 		if (value > 0.0f) {
 			value = 0.0f;
@@ -321,7 +326,7 @@ void displayFunc() {
 		top_vals[(int) g_mouse_x] = value;
 	}
 
-	if ((int) g_mouse_x >= 0 && (int) g_mouse_x < FFT_SIZE && z_pressed == true) {
+	if ((int) g_mouse_x >= 0 && (int) g_mouse_x < HALF_FFT_SIZE && z_pressed == true) {
 		float value = g_mouse_y + g_height_bottom;
 		if (value < (g_height_top - g_height_bottom) * -1) {
 			value = (g_height_top - g_height_bottom) * -1;
@@ -340,8 +345,8 @@ void displayFunc() {
 	glPushMatrix();
 	{
 		glBegin(GL_LINE_STRIP);
-		for (i = 0; i < FFT_SIZE; i++) {
-			x_location = (float) i * g_relative_width / FFT_SIZE
+		for (i = 0; i < HALF_FFT_SIZE; i++) {
+			x_location = (float) i * g_relative_width / FFT_SIZE * 2
 					- g_relative_width / 2;
 			glVertex3f(x_location, g_height_top + top_vals[i], 0.0f);
 		}
@@ -352,8 +357,8 @@ void displayFunc() {
 	glPushMatrix();
 	{
 		glBegin(GL_LINE_STRIP);
-		for (i = 0; i < FFT_SIZE; i++) {
-			x_location = (float) i * g_relative_width / FFT_SIZE
+		for (i = 0; i < HALF_FFT_SIZE; i++) {
+			x_location = (float) i * g_relative_width / FFT_SIZE * 2
 					- g_relative_width / 2;
 			glVertex3f(x_location, g_height_bottom + bottom_vals[i], 0.0f);
 		}
@@ -778,10 +783,20 @@ audioData *synthesizeImpulse(char *fileName) {
 
 			float A = exp(a);
 			for (j = 0; j < num_impulse_blocks; j++) {
+
 				impulse_filter_env_blocks_exp_fit[i][j] = A * exp(b * x[j]);
 				//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j, impulse_filter_env_blocks_exp_fit[i][j]);
 			}
+//			printf("Block #%d: %f\n", i, impulse_filter_env_blocks_exp_fit[i][0]);
+			if (g_max < impulse_filter_env_blocks_exp_fit[i][0]) {
+				g_max = impulse_filter_env_blocks_exp_fit[i][0];
+			}
+//			printf("g_max: %f\n", g_max);
 
+		}
+
+		for (i=0; i<FFT_SIZE/2; i++) {
+			top_vals[i] = ((g_height_top - g_height_bottom) - (impulse_filter_env_blocks_exp_fit[i][0] * (g_height_top - g_height_bottom)/g_max))*-1;
 		}
 
 		/*
@@ -1065,16 +1080,17 @@ void initializePowerOf2Vector() {
 int main(int argc, char **argv) {
 
 
+	loadImpulse();
 
 //	printf("Block duration in nanoseconds: %lu\n",
 //			g_block_duration_in_nanoseconds);
-	int i;
-	for (i = 0; i < FFT_SIZE; i++) {
-		top_vals[i] = 0.0f;
-		bottom_vals[i] = 0.0f;
-	}
+//	int i;
+//	for (i = 0; i < HALF_FFT_SIZE; i++) {
+//		top_vals[i] = 0.0f;
+//		bottom_vals[i] = 0.0f;
+//	}
 
-	loadImpulse();
+
 
 	initialize_glut(argc, argv);
 
