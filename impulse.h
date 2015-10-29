@@ -11,7 +11,7 @@
 #define SAMPLE_RATE			44100
 #define MONO				1
 #define STEREO				2
-#define MIN_FFT_BLOCK_SIZE	128
+#define MIN_FFT_BLOCK_SIZE	512
 
 typedef struct BlockData {
 	float **audioBlocks1;

@@ -185,11 +185,11 @@ void writeWavFile(float *audio, int sample_rate, int numChannels, int numFrames,
 // Takes audioData struct containing a buffer with audio data in it and zero-pads
 // the buffer to the next power of two, updating the numFrames information as well
 audioData *zeroPadToNextPowerOfTwo(audioData *audio) {
+
 	int i;
 
 	// If the audio data is mono
 	if (audio->numChannels == MONO) {
-
 		// find the next power of two
 		int newLength = calculateNextPowerOfTwo(
 				audio->numChannels * audio->numFrames);
