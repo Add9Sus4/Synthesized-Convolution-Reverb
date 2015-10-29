@@ -24,6 +24,7 @@
 									<listOptionValue builtIn="false" value="sndfile"/>
 									<listOptionValue builtIn="false" value="portaudio"/>
 								</option>
+								<option id="macosx.c.link.option.ldflags.245057185" superClass="macosx.c.link.option.ldflags" value="-framework OpenGL -framework GLUT" valueType="string"/>
 								<inputType id="cdt.managedbuild.tool.macosx.c.linker.input.789708574" superClass="cdt.managedbuild.tool.macosx.c.linker.input">
 									<additionalInput kind="additionalinputdependency" paths="$(USER_OBJS)"/>
 									<additionalInput kind="additionalinput" paths="$(LIBS)"/>

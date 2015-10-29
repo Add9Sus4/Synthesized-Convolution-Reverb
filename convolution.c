@@ -667,7 +667,7 @@ void runPortAudio() {
 
 void loadImpulse() {
 
-	impulse = fileToBuffer("synthesizedImpulse_mono_from_churchIR.wav");
+	impulse = fileToBuffer("churchIR.wav");
 	impulse = zeroPadToNextPowerOfTwo(impulse);
 	g_impulse_length = impulse->numFrames;
 	Vector blockLengthVector = determineBlockLengths(impulse);
