@@ -60,9 +60,7 @@ GLfloat g_linewidth = 1.0f;
 
 float top_vals[HALF_FFT_SIZE];
 float bottom_vals[HALF_FFT_SIZE];
-
-float starting_vals[HALF_FFT_SIZE];
-
+float *g_amp_envelope;
 float g_max = 0.0f;
 
 unsigned int g_channels = MONO;
@@ -310,7 +308,8 @@ void displayFunc() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	// draw view here
-	if ((int) g_mouse_x >= 0 && (int) g_mouse_x < HALF_FFT_SIZE && a_pressed == true) {
+	if ((int) g_mouse_x
+			>= 0&& (int) g_mouse_x < HALF_FFT_SIZE && a_pressed == true) {
 		float value = g_mouse_y - g_height_top;
 		if (value > 0.0f) {
 			value = 0.0f;
@@ -326,7 +325,8 @@ void displayFunc() {
 		top_vals[(int) g_mouse_x] = value;
 	}
 
-	if ((int) g_mouse_x >= 0 && (int) g_mouse_x < HALF_FFT_SIZE && z_pressed == true) {
+	if ((int) g_mouse_x
+			>= 0&& (int) g_mouse_x < HALF_FFT_SIZE && z_pressed == true) {
 		float value = g_mouse_y + g_height_bottom;
 		if (value < (g_height_top - g_height_bottom) * -1) {
 			value = (g_height_top - g_height_bottom) * -1;
@@ -671,389 +671,323 @@ void runPortAudio() {
 	}
 }
 
-audioData *synthesizeImpulse(char *fileName) {
+float **getImpulseFFTBlocks(audioData *impulse_from_file) {
+
+	int i, j;
+	/*
+	 * Get FFT profile for impulse
+	 */
+	int num_impulse_blocks = (impulse_from_file->numFrames / FFT_SIZE);
+
+	// Allocate memory for array of filter envelope blocks
+	float **impulse_filter_env_blocks = (float **) malloc(
+			sizeof(float *) * num_impulse_blocks);
+
+	// Allocate memory each individual filter envelope
+	for (i = 0; i < num_impulse_blocks; i++) {
+		impulse_filter_env_blocks[i] = (float *) malloc(
+				sizeof(float) * FFT_SIZE);
+	}
+
+	for (i = 0; i < num_impulse_blocks; i++) {
+
+		// Allocate memory for FFT
+		complex *fftBlock = (complex *) calloc(FFT_SIZE, sizeof(complex));
+		complex *temp = (complex *) calloc(FFT_SIZE, sizeof(complex));
+
+		// Copy impulse into fft buffer
+		for (j = 0; j < FFT_SIZE; j++) {
+			fftBlock[j].Re = impulse_from_file->buffer1[i * FFT_SIZE + j];
+		}
+
+		// Take FFT of block
+		fft(fftBlock, FFT_SIZE, temp);
+
+		/*
+		 * Actually apply frequency-domain filter
+		 */
+		for (j = 0; j < FFT_SIZE; j++) {
+
+			/*
+			 * Obtain magnitude for each frequency bin
+			 */
+			impulse_filter_env_blocks[i][j] = sqrt(
+					pow(fftBlock[j].Re, 2) + pow(fftBlock[j].Im, 2));
+
+		}
+
+		free(temp);
+		free(fftBlock);
+
+	}
+	return impulse_filter_env_blocks;
+}
+
+float **getExponentialFitForImpulseFFTBlocks(int num_impulse_blocks,
+		int length_before_zero_padding, float **impulse_filter_env_blocks) {
+
 	int i, j;
 
-	audioData *FUCK = fileToBuffer("churchIR.wav");
+	int num_nonzero_impulse_blocks = ceil(
+			(float) length_before_zero_padding / FFT_SIZE);
 
+	/*
+	 * For each impulse_filter_env block, create exponential fit (to smooth out filter decay)
+	 */
+	float **impulse_filter_env_blocks_exp_fit = (float **) malloc(
+			sizeof(float *) * FFT_SIZE / 2);
+	for (i = 0; i < FFT_SIZE / 2; i++) {
+		impulse_filter_env_blocks_exp_fit[i] = (float *) calloc(
+				num_impulse_blocks, sizeof(float));
+	}
+
+	int n = num_nonzero_impulse_blocks;
+	float *x = (float *) malloc(sizeof(float) * num_impulse_blocks);
+	for (i = 0; i < num_impulse_blocks; i++) {
+		x[i] = i;
+	}
+
+	for (i = 0; i < FFT_SIZE / 2; i++) {
+		float *temp = (float *) malloc(
+				sizeof(float) * num_nonzero_impulse_blocks);
+		for (j = 0; j < n; j++) {
+			temp[j] = log(impulse_filter_env_blocks[j][i]);
+		}
+
+		float sum_x_times_x = 0.0f;
+		float sum_temp_times_x = 0.0f;
+		float sum_x = 0.0f;
+		float sum_temp = 0.0f;
+
+		for (j = 0; j < n; j++) {
+			sum_x += x[j];
+			sum_temp += temp[j];
+			sum_x_times_x += pow(x[j], 2);
+			sum_temp_times_x += temp[j] * x[j];
+		}
+
+		float b = (n * sum_temp_times_x - sum_x * sum_temp)
+				/ (n * sum_x_times_x - sum_x * sum_x);
+		float a = (sum_temp - b * sum_x) / n;
+
+		float A = exp(a);
+		for (j = 0; j < num_impulse_blocks; j++) {
+
+			impulse_filter_env_blocks_exp_fit[i][j] = A * exp(b * x[j]);
+		}
+		if (g_max < impulse_filter_env_blocks_exp_fit[i][0]) {
+			g_max = impulse_filter_env_blocks_exp_fit[i][0];
+		}
+
+	}
+	return impulse_filter_env_blocks_exp_fit;
+}
+
+float *getAmplitudeEnvelope(audioData *impulse_from_file) {
+	int amp_envelope_length = impulse_from_file->numFrames / SMOOTHING_AMT;
+
+	float *avg_amplitudes = (float *) malloc(
+			sizeof(float) * amp_envelope_length);
+
+	int i, j;
+	for (i = 0; i < amp_envelope_length; i++) {
+
+		float sum = 0;
+
+		for (j = 0; j < SMOOTHING_AMT; j++) {
+			sum += fabsf(impulse_from_file->buffer1[i * SMOOTHING_AMT + j]);
+		}
+
+		sum /= SMOOTHING_AMT;
+
+		avg_amplitudes[i] = sum;
+	}
+
+	/*
+	 * This envelope buffer holds an amplitude envelope that mirrors the
+	 * shape of the original impulse
+	 */
+	float *envelope = (float *) malloc(
+			sizeof(float) * impulse_from_file->numFrames);
+
+	for (i = 0; i < (amp_envelope_length - 1); i++) {
+
+		float difference = avg_amplitudes[i + 1] - avg_amplitudes[i];
+
+		float increment = difference / (float) SMOOTHING_AMT;
+
+		for (j = 0; j < SMOOTHING_AMT; j++) {
+			envelope[i * SMOOTHING_AMT + j] = avg_amplitudes[i]
+					+ (j * increment);
+		}
+
+	}
+	return envelope;
+}
+
+float *getFilteredWhiteNoise(audioData *impulse_from_file,
+		float **impulse_filter_env_blocks_exp_fit) {
+	int i, j;
+	// Buffer to hold processed audio
+	float *synthesized_impulse_buffer = (float *) calloc(
+			impulse_from_file->numFrames, sizeof(float));
+
+	int numBlocks = (impulse_from_file->numFrames / FFT_SIZE);
+
+	for (i = 0; i < numBlocks; i++) {
+
+		// Allocate memory for FFT
+		complex *fftBlock = (complex *) calloc(FFT_SIZE, sizeof(complex));
+		complex *temp = (complex *) calloc(FFT_SIZE, sizeof(complex));
+
+		// Put white noise into fft buffer
+		for (j = 0; j < FFT_SIZE; j++) {
+			fftBlock[j].Re = ((float) rand() / RAND_MAX) * 2.0f - 1.0f;
+		}
+
+		// Take FFT of block
+		fft(fftBlock, FFT_SIZE, temp);
+
+		/*
+		 * Actually apply frequency-domain filter
+		 */
+		for (j = 0; j < FFT_SIZE; j++) {
+
+			if (j < FFT_SIZE / 2) {
+				fftBlock[j].Re *= impulse_filter_env_blocks_exp_fit[j][i];
+				fftBlock[j].Im *= impulse_filter_env_blocks_exp_fit[j][i];
+			} else {
+				fftBlock[j].Re *= impulse_filter_env_blocks_exp_fit[FFT_SIZE - j
+						- 1][i];
+				fftBlock[j].Im *= impulse_filter_env_blocks_exp_fit[FFT_SIZE - j
+						- 1][i];
+			}
+
+		}
+
+		ifft(fftBlock, FFT_SIZE, temp);
+
+		float *fftBlock_float = (float *) malloc(sizeof(float) * FFT_SIZE);
+
+		for (j = 0; j < FFT_SIZE; j++) {
+
+			fftBlock_float[j] = fftBlock[j].Re;
+
+		}
+
+		for (j = 0; j < FFT_SIZE; j++) {
+			synthesized_impulse_buffer[i * FFT_SIZE + j] += fftBlock_float[j];
+		}
+
+		free(temp);
+		free(fftBlock_float);
+		free(fftBlock);
+
+	}
+	return synthesized_impulse_buffer;
+}
+
+void applyAmplitudeEnvelope(audioData *impulse_from_file,
+		float *synthesized_impulse_buffer, float *envelope) {
+	float output_max = 0.0f;
+	int i;
+	/*
+	 * Apply amplitude envelope
+	 */
+	for (i = 0; i < impulse_from_file->numFrames; i++) {
+
+		synthesized_impulse_buffer[i] *= envelope[i];
+
+		if (fabsf(synthesized_impulse_buffer[i]) > output_max) {
+			output_max = fabsf(synthesized_impulse_buffer[i]);
+		}
+
+	}
+
+	for (i = 0; i < impulse_from_file->numFrames; i++) {
+		synthesized_impulse_buffer[i] /= output_max;
+	}
+}
+
+void setTopValsBasedOnImpulseFFTBlocks(
+		float **impulse_filter_env_blocks_exp_fit) {
+	int i;
+
+	for (i = 0; i < FFT_SIZE / 2; i++) {
+		top_vals[i] = ((g_height_top - g_height_bottom)
+				- (impulse_filter_env_blocks_exp_fit[i][0]
+						* (g_height_top - g_height_bottom) / g_max)) * -1;
+	}
+}
+
+audioData *resynthesizeImpulse(audioData *currentImpulse) {
+
+	// Preliminary calculations/processes
 	audioData *synth_impulse = (audioData *) malloc(sizeof(audioData));
-
-	int originalLength = FUCK->numFrames;
-
-	zeroPadToNextPowerOfTwo(FUCK);
-
-	int newLength = FUCK->numFrames / SMOOTHING_AMT;
+	int length = currentImpulse->numFrames;
+	int num_impulse_blocks = (currentImpulse->numFrames / FFT_SIZE);
 
 	/*
 	 * If the impulse is MONO
 	 */
-	if (FUCK->numChannels == 1) {
+	if (currentImpulse->numChannels == 1) {
 
-		/*
-		 * Get FFT profile for impulse
-		 */
-		int num_impulse_blocks = (FUCK->numFrames / FFT_SIZE);
+		//TODO: Create new exponential fit data based on top_vals and bottom_vals, not on impulse data.
 
-		// Allocate memory for array of filter envelope blocks
-		float **impulse_filter_env_blocks = (float **) malloc(
-				sizeof(float *) * num_impulse_blocks);
+		//Then, filter white noise with this exponential fit data.
 
-		// Allocate memory each individual filter envelope
-		for (i = 0; i < num_impulse_blocks; i++) {
-			impulse_filter_env_blocks[i] = (float *) malloc(
-					sizeof(float) * FFT_SIZE);
-		}
+		//Then, apply amp envelope.
+	}
 
-		for (i = 0; i < num_impulse_blocks; i++) {
+	//Then, recalculate all the stuff in loadImpulse() based on the resynthesized impulse.
+	return synth_impulse;
+}
 
-			// Allocate memory for FFT
-			complex *fftBlock = (complex *) calloc(FFT_SIZE, sizeof(complex));
-			complex *temp = (complex *) calloc(FFT_SIZE, sizeof(complex));
+audioData *synthesizeImpulse(char *fileName) {
 
-			// Copy impulse into fft buffer
-			for (j = 0; j < FFT_SIZE; j++) {
-				fftBlock[j].Re = FUCK->buffer1[i * FFT_SIZE + j];
-			}
+// Preliminary calculations/processes
+	audioData *impulse_from_file = fileToBuffer("churchIR.wav");
+	audioData *synth_impulse = (audioData *) malloc(sizeof(audioData));
+	int length_before_zero_padding = impulse_from_file->numFrames;
+	zeroPadToNextPowerOfTwo(impulse_from_file);
+	int num_impulse_blocks = (impulse_from_file->numFrames / FFT_SIZE);
 
-			// Take FFT of block
-			fft(fftBlock, FFT_SIZE, temp);
+	/*
+	 * If the impulse is MONO
+	 */
+	if (impulse_from_file->numChannels == 1) {
 
-			/*
-			 * Actually apply frequency-domain filter
-			 */
-			for (j = 0; j < FFT_SIZE; j++) {
-
-				/*
-				 * Obtain magnitude for each frequency bin
-				 */
-				impulse_filter_env_blocks[i][j] = sqrt(
-						pow(fftBlock[j].Re, 2) + pow(fftBlock[j].Im, 2));
-
-			}
-
-			//			printf("impulse_filter_env_blocks[%d][40]: %f\n", i,
-			//					impulse_filter_env_blocks[i][40]);
-
-			free(temp);
-			free(fftBlock);
-
-		}
-
-		int num_nonzero_impulse_blocks = ceil(
-				(float) originalLength / FFT_SIZE);
+		// Get the impulse FFT spectrogram
+		float **impulse_filter_env_blocks = getImpulseFFTBlocks(
+				impulse_from_file);
 
 		/*
 		 * For each impulse_filter_env block, create exponential fit (to smooth out filter decay)
 		 */
-		float **impulse_filter_env_blocks_exp_fit = (float **) malloc(
-				sizeof(float *) * FFT_SIZE / 2);
-		for (i = 0; i < FFT_SIZE / 2; i++) {
-			impulse_filter_env_blocks_exp_fit[i] = (float *) calloc(
-					num_impulse_blocks, sizeof(float));
-		}
-
-		int n = num_nonzero_impulse_blocks;
-		float *x = (float *) malloc(sizeof(float) * num_impulse_blocks);
-		for (i = 0; i < num_impulse_blocks; i++) {
-			x[i] = i;
-		}
-
-		for (i = 0; i < FFT_SIZE / 2; i++) {
-			float *temp = (float *) malloc(
-					sizeof(float) * num_nonzero_impulse_blocks);
-			for (j = 0; j < n; j++) {
-				temp[j] = log(impulse_filter_env_blocks[j][i]);
-			}
-
-			float sum_x_times_x = 0.0f;
-			float sum_temp_times_x = 0.0f;
-			float sum_x = 0.0f;
-			float sum_temp = 0.0f;
-
-			for (j = 0; j < n; j++) {
-				sum_x += x[j];
-				sum_temp += temp[j];
-				sum_x_times_x += pow(x[j], 2);
-				sum_temp_times_x += temp[j] * x[j];
-			}
-
-			float b = (n * sum_temp_times_x - sum_x * sum_temp)
-					/ (n * sum_x_times_x - sum_x * sum_x);
-			float a = (sum_temp - b * sum_x) / n;
-
-			float A = exp(a);
-			for (j = 0; j < num_impulse_blocks; j++) {
-
-				impulse_filter_env_blocks_exp_fit[i][j] = A * exp(b * x[j]);
-				//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j, impulse_filter_env_blocks_exp_fit[i][j]);
-			}
-//			printf("Block #%d: %f\n", i, impulse_filter_env_blocks_exp_fit[i][0]);
-			if (g_max < impulse_filter_env_blocks_exp_fit[i][0]) {
-				g_max = impulse_filter_env_blocks_exp_fit[i][0];
-			}
-//			printf("g_max: %f\n", g_max);
-
-		}
-
-		for (i=0; i<FFT_SIZE/2; i++) {
-			top_vals[i] = ((g_height_top - g_height_bottom) - (impulse_filter_env_blocks_exp_fit[i][0] * (g_height_top - g_height_bottom)/g_max))*-1;
-		}
-
-		/*
-		 * This section writes impulse filter env blocks to a csv file.
-		 */
-		FILE *fp;
-
-		char *fileName = "test.csv";
-		fp = fopen(fileName, "w+");
-
-		fprintf(fp, "Block number");
-
-		float inc = (float) SAMPLE_RATE / FFT_SIZE;
-
-		for (j = 0; j < FFT_SIZE / 2; j++) {
-			float freq = ((float) j) * inc;
-			fprintf(fp, ", %f Hz", freq);
-		}
-
-		for (i = 0; i < num_nonzero_impulse_blocks; i++) {
-
-			fprintf(fp, "\n%d", i);
-
-			for (j = 0; j < FFT_SIZE / 2; j++) {
-
-				fprintf(fp, ", %f", impulse_filter_env_blocks[i][j]);
-			}
-
-		}
-
-		fclose(fp);
-
-		//		for (i=0; i< num_impulse_blocks; i++) {
-		//			for (j=0; j<FFT_SIZE; j++) {
-		//				impulse_filter_env_blocks[i][j] /= impulse_max;
-		//				printf("impulse_filter_env_blocks[%d][%d]: %f\n", i, j, impulse_filter_env_blocks[i][j]);
-		//			}
-		//		}
-
-		float *SHIT = (float *) malloc(sizeof(float) * newLength);
-
-		for (i = 0; i < newLength; i++) {
-
-			float sum = 0;
-
-			for (j = 0; j < SMOOTHING_AMT; j++) {
-				sum += fabsf(FUCK->buffer1[i * SMOOTHING_AMT + j]);
-			}
-
-			sum /= SMOOTHING_AMT;
-
-			SHIT[i] = sum;
-		}
-
-		/*
-		 * This envelope buffer holds an amplitude envelope that mirrors the
-		 * shape of the original impulse
-		 */
-		float *envelope = (float *) malloc(sizeof(float) * FUCK->numFrames);
-
-		for (i = 0; i < (newLength - 1); i++) {
-
-			float difference = SHIT[i + 1] - SHIT[i];
-
-			float increment = difference / (float) SMOOTHING_AMT;
-
-			for (j = 0; j < SMOOTHING_AMT; j++) {
-				envelope[i * SMOOTHING_AMT + j] = SHIT[i]
-						+ (j * increment);
-			}
-
-		}
-
-		/*
-		 * Create white noise
-		 */
-		float *whiteNoise = (float *) malloc(
-				sizeof(float) * FUCK->numFrames);
-
-		for (i = 0; i < FUCK->numFrames; i++) {
-
-			whiteNoise[i] = ((float) rand() / RAND_MAX) * 2.0f - 1.0f;
-
-		}
-
-		/*
-		 * Here is where the filtering will happen
-		 */
-
-		/*
-		 * Create frequency filtering envelope
-		 */
-		float max = 1.0;
-		float min = 0.0;
-
-		/*
-		 * This envelope contains values by which frequency domain samples
-		 * will be multiplied
-		 */
-		float *filter_env = (float *) malloc(
-				sizeof(float) * FUCK->numFrames);
-
-		// Determine which sample represents nyquist
-		int nyquist = FFT_SIZE / 2;
-
-		float increment = (max - min) / nyquist;
-
-		for (i = 0; i < nyquist; i++) {
-
-			//			float env_amt = max - i * increment;
-
-			float env_amt = pow(0.95, i);
-
-			//			printf("env_amt[%d]: %f\n", i, env_amt);
-
-			// Calculate filter to samples up to nyquist
-			filter_env[i] = env_amt;
-
-			// For samples above nyquist, calculate reverse of filter.
-			filter_env[nyquist * 2 - 1 - i] = env_amt;
-
-		}
-
-		int numBlocks = (FUCK->numFrames / FFT_SIZE);
-
-		// Allocate memory for array of filter envelope blocks
-		float **filter_env_blocks = (float **) malloc(
-				sizeof(float *) * numBlocks);
-
-		// Allocate memory each individual filter envelope
-		for (i = 0; i < numBlocks; i++) {
-			filter_env_blocks[i] = (float *) malloc(sizeof(float) * FFT_SIZE);
-		}
-
-		// Fill each filter envelope with the correct samples
-		// For each block
-		for (i = 0; i < numBlocks; i++) {
-			// For each frequency bin
-			for (j = 0; j < nyquist; j++) {
-
-				float start_value = 1.0f;
-				float end_value = filter_env[j];
-
-				float factor = start_value * pow(0.90, i); // exp from 1 to 0
-
-				float range = start_value - end_value;
-
-				float block_env_amt = end_value + range * factor;
-
-				// values below nyquist
-				filter_env_blocks[i][j] = block_env_amt;
-
-				// values above nyquist
-				filter_env_blocks[i][nyquist * 2 - 1 - j] = block_env_amt;
-
-			}
-		}
-
-		// Buffer to hold processed audio
-		float *MOTHERFUCKER = (float *) calloc(FUCK->numFrames, sizeof(float));
-
-		for (i = 0; i < numBlocks; i++) {
-
-			// Allocate memory for FFT
-			complex *fftBlock = (complex *) calloc(FFT_SIZE, sizeof(complex));
-			complex *temp = (complex *) calloc(FFT_SIZE, sizeof(complex));
-
-			// Put white noise into fft buffer
-			for (j = 0; j < FFT_SIZE; j++) {
-				fftBlock[j].Re = ((float) rand() / RAND_MAX) * 2.0f - 1.0f;
-			}
-
-			// Take FFT of block
-			fft(fftBlock, FFT_SIZE, temp);
-
-			/*
-			 * Actually apply frequency-domain filter
-			 */
-			for (j = 0; j < FFT_SIZE; j++) {
-
-				//				fftBlock[j].Re *= filter_env_blocks[i][j];
-				//				fftBlock[j].Im *= filter_env_blocks[i][j];
-
-				if (j < FFT_SIZE / 2) {
-					fftBlock[j].Re *= impulse_filter_env_blocks_exp_fit[j][i];
-					fftBlock[j].Im *= impulse_filter_env_blocks_exp_fit[j][i];
-				} else {
-					fftBlock[j].Re *= impulse_filter_env_blocks_exp_fit[FFT_SIZE
-							- j - 1][i];
-					fftBlock[j].Im *= impulse_filter_env_blocks_exp_fit[FFT_SIZE
-							- j - 1][i];
-				}
-
-				//				fftBlock[j].Re *= impulse_filter_env_blocks[i][j];
-				//				fftBlock[j].Im *= impulse_filter_env_blocks[i][j];
-
-			}
-
-			ifft(fftBlock, FFT_SIZE, temp);
-
-			float *fftBlock_float = (float *) malloc(sizeof(float) * FFT_SIZE);
-
-			//			float *hanning_window = (float *) malloc(sizeof(float) * FFT_SIZE);
-			//
-			//			 hanning(hanning_window, FFT_SIZE);
-
-			for (j = 0; j < FFT_SIZE; j++) {
-
-				fftBlock_float[j] = fftBlock[j].Re;
-				//				fftBlock_float[j] *= hanning_window[j];
-
-			}
-
-			for (j = 0; j < FFT_SIZE; j++) {
-				MOTHERFUCKER[i * FFT_SIZE + j] += fftBlock_float[j];
-			}
-
-			free(temp);
-			free(fftBlock_float);
-			//			free(hanning_window);
-			free(fftBlock);
-
-		}
-
-		float output_max = 0.0f;
-		/*
-		 * Apply amplitude envelope
-		 */
-		for (i = 0; i < FUCK->numFrames; i++) {
-
-			MOTHERFUCKER[i] *= envelope[i];
-
-			if (fabsf(MOTHERFUCKER[i]) > output_max) {
-				output_max = fabsf(MOTHERFUCKER[i]);
-			}
-
-		}
-
-		for (i = 0; i < FUCK->numFrames; i++) {
-			MOTHERFUCKER[i] /= output_max;
-			//			printf("output[%d]: %f\n", i, output[i]);
-		}
-
-		free(filter_env);
-
-		writeWavFile(MOTHERFUCKER, SAMPLE_RATE, 1, FUCK->numFrames, 1,
-				"fuck.wav");
-
-		synth_impulse->buffer1 = (float *) malloc(sizeof(float) * FUCK->numFrames);
-		synth_impulse->buffer2 = (float *) malloc(sizeof(float) * FUCK->numFrames);
-//
-		synth_impulse->buffer1 = MOTHERFUCKER;
-		synth_impulse->buffer2 = MOTHERFUCKER;
-		synth_impulse->numChannels = 1;
-		synth_impulse->numFrames = FUCK->numFrames;
+		float **impulse_filter_env_blocks_exp_fit =
+				getExponentialFitForImpulseFFTBlocks(num_impulse_blocks,
+						length_before_zero_padding, impulse_filter_env_blocks);
+
+		// Use exponential fit data to draw impulse frequency response
+		setTopValsBasedOnImpulseFFTBlocks(impulse_filter_env_blocks_exp_fit);
+
+		g_amp_envelope = getAmplitudeEnvelope(impulse_from_file);
+
+		// Filter white noise with exponential fit FFT data
+		float *synthesized_impulse_buffer = getFilteredWhiteNoise(
+				impulse_from_file, impulse_filter_env_blocks_exp_fit);
+
+		// Apply the amplitude envelope
+		applyAmplitudeEnvelope(impulse_from_file, synthesized_impulse_buffer,
+				g_amp_envelope);
+
+		// Put synthesized impulse in audioData struct
+		synth_impulse->buffer1 = synthesized_impulse_buffer;
+		synth_impulse->numChannels = impulse_from_file->numChannels;
+		synth_impulse->numFrames = impulse_from_file->numFrames;
 		synth_impulse->sampleRate = SAMPLE_RATE;
 	}
+
 	return synth_impulse;
 }
 
@@ -1079,7 +1013,6 @@ void initializePowerOf2Vector() {
 
 int main(int argc, char **argv) {
 
-
 	loadImpulse();
 
 //	printf("Block duration in nanoseconds: %lu\n",
@@ -1089,8 +1022,6 @@ int main(int argc, char **argv) {
 //		top_vals[i] = 0.0f;
 //		bottom_vals[i] = 0.0f;
 //	}
-
-
 
 	initialize_glut(argc, argv);
 
