@@ -7,9 +7,10 @@
 
 #define NANOSECONDS_IN_A_SECOND			1000000000
 #define NUM_CHECKS_PER_CYCLE			2
-#define FFT_SIZE MIN_FFT_BLOCK_SIZE
-#define SMOOTHING_AMT	4
-#define HALF_FFT_SIZE FFT_SIZE/2
+#define FFT_SIZE 						MIN_FFT_BLOCK_SIZE
+#define SMOOTHING_AMT					2048
+#define HALF_FFT_SIZE 					FFT_SIZE/2
+#define SAMPLES_PER_MS					SAMPLE_RATE/1000
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -62,6 +63,16 @@ float top_vals[HALF_FFT_SIZE];
 float bottom_vals[HALF_FFT_SIZE];
 float *g_amp_envelope;
 float g_max = 0.0f;
+
+// Length of crossover between synthesized and recorded impulse
+int crossover_length = 200 * SAMPLES_PER_MS;
+
+// Location of point at which crossover between synthesized and recorded impulse begins
+int crossover_point = 50 * SAMPLES_PER_MS;
+
+float synthesized_impulse_gain_factor = 0.4f;
+
+bool use_attack_from_impulse = true;
 
 unsigned int g_channels = MONO;
 
@@ -266,6 +277,7 @@ void reshapeFunc(int w, int h) {
 // Desc: sets initial OpenGL states and initializes any application data
 //-----------------------------------------------------------------------------
 void initialize_graphics() {
+
 	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);					// Black Background
 	// set the shading model to 'smooth'
 	glShadeModel( GL_SMOOTH);
@@ -305,6 +317,9 @@ void displayFunc() {
 //	}
 //	g_ready = false;
 
+//	glMatrixMode(GL_MODELVIEW);
+//	glLoadIdentity();
+
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	// draw view here
@@ -338,7 +353,6 @@ void displayFunc() {
 
 		value += (g_height_top - g_height_bottom);
 
-//			printf("g_mouse_y: %f, g_height_bottom: %f, value: %f\n", g_mouse_y, g_height_bottom, value);
 		bottom_vals[(int) g_mouse_x] = value;
 	}
 
@@ -366,8 +380,8 @@ void displayFunc() {
 	}
 	glPopMatrix();
 
-	glFlush();
 	glutSwapBuffers();
+	glFlush();
 }
 
 /*
@@ -611,6 +625,9 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 	return paContinue;
 }
 
+/*
+ * This function is responsible for starting PortAudio and OpenGL.
+ */
 void runPortAudio() {
 	PaStream* stream;
 	PaStreamParameters outputParameters;
@@ -671,6 +688,14 @@ void runPortAudio() {
 	}
 }
 
+/*
+ * This function takes an impulse and returns its frequency data over time
+ * in a 2-dimensional buffer.
+ *
+ * float **impulse_filter_env_blocks[i][j], where i = time (in blocks)
+ * and j = frequency bin number
+ *
+ */
 float **getImpulseFFTBlocks(audioData *impulse_from_file) {
 
 	int i, j;
@@ -723,6 +748,14 @@ float **getImpulseFFTBlocks(audioData *impulse_from_file) {
 	return impulse_filter_env_blocks;
 }
 
+/*
+ * This function takes the frequency data of an impulse, computes best-fit exponential
+ * functions for each frequency bin over time, and returns the values calculated from
+ * these exponential functions in a 2-dimensional buffer.
+ *
+ * float **impulse_filter_env_blocks_exp_fit[i][j], where i = frequency bin number
+ * and j = time (in blocks).
+ */
 float **getExponentialFitForImpulseFFTBlocks(int num_impulse_blocks,
 		int length_before_zero_padding, float **impulse_filter_env_blocks) {
 
@@ -783,6 +816,11 @@ float **getExponentialFitForImpulseFFTBlocks(int num_impulse_blocks,
 	return impulse_filter_env_blocks_exp_fit;
 }
 
+/*
+ * This function computes the amplitude envelope of an impulse.
+ *
+ * float *envelope[i], where i = sample number
+ */
 float *getAmplitudeEnvelope(audioData *impulse_from_file) {
 	int amp_envelope_length = impulse_from_file->numFrames / SMOOTHING_AMT;
 
@@ -801,6 +839,7 @@ float *getAmplitudeEnvelope(audioData *impulse_from_file) {
 		sum /= SMOOTHING_AMT;
 
 		avg_amplitudes[i] = sum;
+
 	}
 
 	/*
@@ -822,13 +861,71 @@ float *getAmplitudeEnvelope(audioData *impulse_from_file) {
 		}
 
 	}
+
+	for (i = 0; i < impulse_from_file->numFrames; i++) {
+		if (envelope[i] < 0.000001) {
+			envelope[i] = 0.000001;
+		}
+	}
 	return envelope;
 }
 
+/*
+ * This function computes an exponential fit for an amplitude envelope.
+ */
+float *getExponentialFitForAmplitudeEnvelope(float *envelope,
+		audioData *impulse_from_file) {
+
+	int length = impulse_from_file->numFrames;
+
+	float *exp_fit = (float *) malloc(sizeof(float) * length);
+
+	float *temp = (float *) malloc(sizeof(float) * length);
+
+	int i;
+
+	float *x = (float *) malloc(sizeof(float) * length);
+	for (i = 0; i < length; i++) {
+		x[i] = i;
+	}
+
+	for (i = 0; i < length; i++) {
+		temp[i] = log(envelope[i]);
+	}
+
+	float sum_x_times_x = 0.0f;
+	float sum_temp_times_x = 0.0f;
+	float sum_x = 0.0f;
+	float sum_temp = 0.0f;
+
+	for (i = 0; i < length; i++) {
+		sum_x += x[i];
+		sum_temp += temp[i];
+		sum_x_times_x += pow(x[i], 2);
+		sum_temp_times_x += temp[i] * x[i];
+	}
+
+	float b = (length * sum_temp_times_x - sum_x * sum_temp)
+			/ (length * sum_x_times_x - sum_x * sum_x);
+	float a = (sum_temp - b * sum_x) / length;
+
+	float A = exp(a);
+
+	for (i = 0; i < length; i++) {
+		exp_fit[i] = A * exp(b * x[i]);
+	}
+
+	return exp_fit;
+}
+/*
+ * This function filters white noise using the exponential fit filter data.
+ *
+ * float *synthesized_impulse_buffer[i], where i = sample number.
+ */
 float *getFilteredWhiteNoise(audioData *impulse_from_file,
 		float **impulse_filter_env_blocks_exp_fit) {
 	int i, j;
-	// Buffer to hold processed audio
+// Buffer to hold processed audio
 	float *synthesized_impulse_buffer = (float *) calloc(
 			impulse_from_file->numFrames, sizeof(float));
 
@@ -887,16 +984,31 @@ float *getFilteredWhiteNoise(audioData *impulse_from_file,
 	return synthesized_impulse_buffer;
 }
 
+/*
+ * This function actually applies the amplitude envelope to the filtered white
+ * noise buffer.
+ */
 void applyAmplitudeEnvelope(audioData *impulse_from_file,
 		float *synthesized_impulse_buffer, float *envelope) {
 	float output_max = 0.0f;
 	int i;
+	float *exp_fit = getExponentialFitForAmplitudeEnvelope(envelope,
+			impulse_from_file);
+
+	float *differences = (float *) malloc(
+			sizeof(float) * impulse_from_file->numFrames);
+
+	for (i = 0; i < impulse_from_file->numFrames; i++) {
+		differences[i] = envelope[i] / exp_fit[i];
+//		printf("differences[%d]: %f/%f: %f\n", i, envelope[i], exp_fit[i], differences[i]);
+	}
+
 	/*
 	 * Apply amplitude envelope
 	 */
 	for (i = 0; i < impulse_from_file->numFrames; i++) {
 
-		synthesized_impulse_buffer[i] *= envelope[i];
+		synthesized_impulse_buffer[i] *= differences[i];
 
 		if (fabsf(synthesized_impulse_buffer[i]) > output_max) {
 			output_max = fabsf(synthesized_impulse_buffer[i]);
@@ -904,11 +1016,17 @@ void applyAmplitudeEnvelope(audioData *impulse_from_file,
 
 	}
 
+	output_max /= synthesized_impulse_gain_factor;
+
 	for (i = 0; i < impulse_from_file->numFrames; i++) {
 		synthesized_impulse_buffer[i] /= output_max;
 	}
 }
 
+/*
+ * This function stores initial exponential fit values (for the first block of data)
+ * so that it can be visually displayed using OpenGL.
+ */
 void setTopValsBasedOnImpulseFFTBlocks(
 		float **impulse_filter_env_blocks_exp_fit) {
 	int i;
@@ -920,12 +1038,15 @@ void setTopValsBasedOnImpulseFFTBlocks(
 	}
 }
 
+/*
+ * This function resynthesizes the impulse whenever a change is made.
+ */
 audioData *resynthesizeImpulse(audioData *currentImpulse) {
 
-	// Preliminary calculations/processes
+// Preliminary calculations/processes
 	audioData *synth_impulse = (audioData *) malloc(sizeof(audioData));
-	int length = currentImpulse->numFrames;
-	int num_impulse_blocks = (currentImpulse->numFrames / FFT_SIZE);
+//	int length = currentImpulse->numFrames;
+//	int num_impulse_blocks = (currentImpulse->numFrames / FFT_SIZE);
 
 	/*
 	 * If the impulse is MONO
@@ -939,10 +1060,67 @@ audioData *resynthesizeImpulse(audioData *currentImpulse) {
 		//Then, apply amp envelope.
 	}
 
-	//Then, recalculate all the stuff in loadImpulse() based on the resynthesized impulse.
+//Then, recalculate all the stuff in loadImpulse() based on the resynthesized impulse.
 	return synth_impulse;
 }
 
+//-----------------------------------------------------------------------------
+// name: hanning()
+// desc: make window
+//-----------------------------------------------------------------------------
+void create_hanning( float * window, unsigned long length )
+{
+   unsigned long i;
+   double pi, phase = 0, delta;
+
+   pi = 4.*atan(1.0);
+   delta = 2 * pi / (double) length;
+
+   for( i = 0; i < length; i++ )
+   {
+       window[i] = (float)(0.5 * (1.0 - cos(phase)));
+       phase += delta;
+   }
+}
+
+void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
+		audioData* impulse_from_file) {
+
+	int i;
+
+	if (!use_attack_from_impulse) {
+		return;
+	}
+
+	// Create window for use in crossfading
+	float *window = (float *) malloc(sizeof(float) * crossover_length * 2);
+	create_hanning(window, crossover_length * 2);
+
+	// Use original impulse up until crossover point
+	for (i = 0; i < crossover_point; i++) {
+		synthesized_impulse_buffer[i] = impulse_from_file->buffer1[i];
+	}
+
+	// Fade between original and synthesized impulse over crossover length
+	for (i = 0; i < crossover_length; i++) {
+
+		// Use second half of hanning window to fade out original component
+		float original_component = impulse_from_file->buffer1[crossover_point
+				+ i] * window[crossover_length + i];
+
+		// Use first half of hanning window to fade in synthesized component
+		float synthesized_component = synthesized_impulse_buffer[crossover_point
+				+ i] * window[i];
+
+		// Sum the two together to complete the crossfade
+		synthesized_impulse_buffer[crossover_point + i] = original_component
+				+ synthesized_component;
+	}
+}
+
+/*
+ * This function synthesizes an impulse from an audio file.
+ */
 audioData *synthesizeImpulse(char *fileName) {
 
 // Preliminary calculations/processes
@@ -951,6 +1129,18 @@ audioData *synthesizeImpulse(char *fileName) {
 	int length_before_zero_padding = impulse_from_file->numFrames;
 	zeroPadToNextPowerOfTwo(impulse_from_file);
 	int num_impulse_blocks = (impulse_from_file->numFrames / FFT_SIZE);
+
+	int i;
+	float max = 0.0f;
+	for (i = 0; i < impulse_from_file->numFrames; i++) {
+		if (fabsf(impulse_from_file->buffer1[i]) > max) {
+			max = fabsf(impulse_from_file->buffer1[i]);
+		}
+	}
+
+	for (i = 0; i < impulse_from_file->numFrames; i++) {
+		impulse_from_file->buffer1[i] /= max;
+	}
 
 	/*
 	 * If the impulse is MONO
@@ -981,6 +1171,15 @@ audioData *synthesizeImpulse(char *fileName) {
 		applyAmplitudeEnvelope(impulse_from_file, synthesized_impulse_buffer,
 				g_amp_envelope);
 
+		// crossfade between recorded impulse attack and synthesized tail
+		crossfadeRecordedAndSynthesizedImpulses(synthesized_impulse_buffer,
+				impulse_from_file);
+
+		// Write to a wav file
+		writeWavFile(synthesized_impulse_buffer, impulse_from_file->sampleRate,
+				impulse_from_file->numChannels, impulse_from_file->numFrames, 1,
+				"11_6_2015_test.wav");
+
 		// Put synthesized impulse in audioData struct
 		synth_impulse->buffer1 = synthesized_impulse_buffer;
 		synth_impulse->numChannels = impulse_from_file->numChannels;
@@ -991,10 +1190,13 @@ audioData *synthesizeImpulse(char *fileName) {
 	return synth_impulse;
 }
 
-void loadImpulse() {
+/*
+ * This function loads an impulse from a given filename
+ */
+void loadImpulse(char *name) {
 
-	impulse = synthesizeImpulse("churchIR.wav");
-//	impulse = fileToBuffer("fuck.wav");
+	impulse = synthesizeImpulse(name);
+//	impulse = fileToBuffer("churchIR.wav");
 	impulse = zeroPadToNextPowerOfTwo(impulse);
 	g_impulse_length = impulse->numFrames;
 	Vector blockLengthVector = determineBlockLengths(impulse);
@@ -1003,6 +1205,10 @@ void loadImpulse() {
 	g_fftData_ptr = allocateFFTBuffers(data_ptr, blockLengthVector, impulse);
 }
 
+/*
+ * This function is responsible for generating the block lengths used in the
+ * partitioning scheme for real-time convolution.
+ */
 void initializePowerOf2Vector() {
 	vector_init(&g_powerOf2Vector);
 	int counter = 0;
@@ -1011,9 +1217,12 @@ void initializePowerOf2Vector() {
 	}
 }
 
+/*
+ * Main function.
+ */
 int main(int argc, char **argv) {
 
-	loadImpulse();
+	loadImpulse("churchIR.wav");
 
 //	printf("Block duration in nanoseconds: %lu\n",
 //			g_block_duration_in_nanoseconds);
