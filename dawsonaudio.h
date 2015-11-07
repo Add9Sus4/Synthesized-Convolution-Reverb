@@ -23,6 +23,8 @@ typedef struct audioData {
 
 } audioData;
 
+void free_audioData(audioData *audio);
+
 float *normalizeBuffer(float *buffer, int length);
 
 // Read audio data to buffer

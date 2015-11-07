@@ -74,6 +74,8 @@ float synthesized_impulse_gain_factor = 0.4f;
 
 bool use_attack_from_impulse = true;
 
+bool changingImpulse = false;
+
 unsigned int g_channels = MONO;
 
 typedef struct FFTArgs {
@@ -106,7 +108,7 @@ pthread_t thread;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
 
-audioData* impulse;
+audioData* g_impulse;
 
 /*
  * This buffer is used to store INCOMING audio from the mic.
@@ -127,6 +129,7 @@ void passiveMotionFunc(int, int);
 void keyboardUpFunc(unsigned char, int, int);
 void initialize_graphics();
 void initialize_glut(int argc, char *argv[]);
+void reloadImpulse();
 
 void initializeGlobalParameters() {
 	g_block_length = MIN_FFT_BLOCK_SIZE;
@@ -200,6 +203,13 @@ void keyboardFunc(unsigned char key, int x, int y) {
 			glutReshapeWindow(g_last_width, g_last_height);
 		}
 		g_fullscreen = !g_fullscreen;
+		break;
+	case 'r':
+		printf("reloading impulse...\n");
+		changingImpulse = true;
+		reloadImpulse();
+		changingImpulse = false;
+		printf("impulse reloaded\n");
 		break;
 	case 'q':
 		exit(0);
@@ -437,7 +447,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 	int fftBlockNumber = fftArgs->impulse_block_number;
 
 	// If the impulse is mono
-	if (impulse->numChannels == MONO) {
+	if (g_impulse->numChannels == MONO) {
 
 		// 5. Create buffer of length 2 * (last_sample_index - first_sample_index) to hold the result of
 		//    FFT multiplication.
@@ -447,6 +457,16 @@ void *calculateFFT(void *incomingFFTArgs) {
 		complex c;
 
 		for (i = 0; i < convLength; i++) {
+
+			if (changingImpulse) {
+				free(convResult);
+				free(temp);
+				free(inputAudio);
+				free(fftArgs);
+				pthread_exit(NULL);
+				return NULL;
+			}
+
 			c = complex_mult(inputAudio[i],
 					g_fftData_ptr->fftBlocks1[fftBlockNumber][i]);
 
@@ -454,6 +474,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 			convResult[i].Im = c.Im;
 
 		}
+
 		// 7. Take the IFFT of the buffer created in part 5.
 		ifft(convResult, convLength, temp);
 
@@ -474,7 +495,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 	}
 
 	// If the impulse is stereo
-	if (impulse->numChannels == STEREO) {
+	if (g_impulse->numChannels == STEREO) {
 
 		// 5. Create buffer of length 2 * (last_sample_index - first_sample_index) to hold the result of
 		//    FFT multiplication.
@@ -549,77 +570,85 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 
 	int i, j;
 
-	if (impulse->numChannels == MONO) {
-		for (i = 0; i < framesPerBuffer; i++) {
-			outBuf[i] = g_output_storage_buffer1[i];
+	if (!changingImpulse) {
+
+		if (g_impulse->numChannels == MONO) {
+			for (i = 0; i < framesPerBuffer; i++) {
+				outBuf[i] = g_output_storage_buffer1[i];
+			}
 		}
-	}
 
-	if (impulse->numChannels == STEREO) {
-		for (i = 0; i < framesPerBuffer; i++) {
-			outBuf[2 * i] = g_output_storage_buffer1[i];
-			outBuf[2 * i + 1] = g_output_storage_buffer2[i];
+		if (g_impulse->numChannels == STEREO) {
+			for (i = 0; i < framesPerBuffer; i++) {
+				outBuf[2 * i] = g_output_storage_buffer1[i];
+				outBuf[2 * i + 1] = g_output_storage_buffer2[i];
+			}
 		}
-	}
 
-	++g_counter;
+		++g_counter;
 
-	if (g_counter >= g_max_factor * 2 + 1) {
-		g_counter = 1;
-	}
-
-	// Shift g_input_storage_buffer to the left by g_block_length
-	for (i = 0; i < g_input_storage_buffer_length - g_block_length; i++) {
-		g_input_storage_buffer[i] = g_input_storage_buffer[i + g_block_length];
-	}
-
-	// Fill right-most portion of g_input_storage_buffer with most recent audio
-	for (i = 0; i < g_block_length; i++) {
-		g_input_storage_buffer[g_input_storage_buffer_length - g_block_length
-				+ i] = inBuf[i] * 0.00001f;
-	}
-
-	/*
-	 * Create threads
-	 */
-	for (j = 0; j < g_powerOf2Vector.size; j++) {
-		int factor = vector_get(&g_powerOf2Vector, j);
-		if (g_counter % factor == 0 && g_counter != 0) {
-
-			/*
-			 * Take the specified samples from the input_storage_buffer, zero-pad them to twice their
-			 * length, FFT them, multiply the resulting spectrum by the corresponding impulse FFT block,
-			 * IFFT the result, put the result in the output_storage_buffer.
-			 */
-			FFTArgs *fftArgs = (FFTArgs *) malloc(sizeof(FFTArgs));
-
-			fftArgs->first_sample_index = (1 + g_end_sample
-					- g_block_length * factor);
-			fftArgs->last_sample_index = g_end_sample;
-			fftArgs->impulse_block_number = (j * 2 + 1);
-			fftArgs->num_callbacks_to_complete = factor;
-			fftArgs->counter = g_counter;
-			pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs);
-
-			FFTArgs *fftArgs2 = (FFTArgs *) malloc(sizeof(FFTArgs));
-			fftArgs2->first_sample_index = (1 + g_end_sample
-					- g_block_length * factor);
-			fftArgs2->last_sample_index = g_end_sample;
-			fftArgs2->impulse_block_number = (j * 2 + 2);
-			fftArgs2->num_callbacks_to_complete = factor * 2;
-			fftArgs2->counter = g_counter;
-
-			pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs2);
-
+		if (g_counter >= g_max_factor * 2 + 1) {
+			g_counter = 1;
 		}
-	}
 
-	// Shift g_output_storage_buffer
-	for (i = 0; i < g_output_storage_buffer1_length - g_block_length; i++) {
-		g_output_storage_buffer1[i] = g_output_storage_buffer1[i
-				+ g_block_length];
-		g_output_storage_buffer2[i] = g_output_storage_buffer2[i
-				+ g_block_length];
+		// Shift g_input_storage_buffer to the left by g_block_length
+		for (i = 0; i < g_input_storage_buffer_length - g_block_length; i++) {
+			g_input_storage_buffer[i] = g_input_storage_buffer[i
+					+ g_block_length];
+		}
+
+		// Fill right-most portion of g_input_storage_buffer with most recent audio
+		for (i = 0; i < g_block_length; i++) {
+			g_input_storage_buffer[g_input_storage_buffer_length
+					- g_block_length + i] = inBuf[i] * 0.00001f;
+		}
+
+		/*
+		 * Create threads
+		 */
+		for (j = 0; j < g_powerOf2Vector.size; j++) {
+			int factor = vector_get(&g_powerOf2Vector, j);
+			if (g_counter % factor == 0 && g_counter != 0) {
+
+				/*
+				 * Take the specified samples from the input_storage_buffer, zero-pad them to twice their
+				 * length, FFT them, multiply the resulting spectrum by the corresponding impulse FFT block,
+				 * IFFT the result, put the result in the output_storage_buffer.
+				 */
+				FFTArgs *fftArgs = (FFTArgs *) malloc(sizeof(FFTArgs));
+
+				fftArgs->first_sample_index = (1 + g_end_sample
+						- g_block_length * factor);
+				fftArgs->last_sample_index = g_end_sample;
+				fftArgs->impulse_block_number = (j * 2 + 1);
+				fftArgs->num_callbacks_to_complete = factor;
+				fftArgs->counter = g_counter;
+				pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs);
+
+				FFTArgs *fftArgs2 = (FFTArgs *) malloc(sizeof(FFTArgs));
+				fftArgs2->first_sample_index = (1 + g_end_sample
+						- g_block_length * factor);
+				fftArgs2->last_sample_index = g_end_sample;
+				fftArgs2->impulse_block_number = (j * 2 + 2);
+				fftArgs2->num_callbacks_to_complete = factor * 2;
+				fftArgs2->counter = g_counter;
+
+				pthread_create(&thread, NULL, calculateFFT, (void *) fftArgs2);
+
+			}
+		}
+
+		// Shift g_output_storage_buffer
+		for (i = 0; i < g_output_storage_buffer1_length - g_block_length; i++) {
+			g_output_storage_buffer1[i] = g_output_storage_buffer1[i
+					+ g_block_length];
+			g_output_storage_buffer2[i] = g_output_storage_buffer2[i
+					+ g_block_length];
+		}
+	} else {
+		for (i=0; i<framesPerBuffer; i++) {
+			outBuf[i] = 0.0f;
+		}
 	}
 
 	return paContinue;
@@ -637,7 +666,7 @@ void runPortAudio() {
 	Pa_Initialize();
 	/* Set output stream parameters */
 	outputParameters.device = Pa_GetDefaultOutputDevice();
-	outputParameters.channelCount = impulse->numChannels;
+	outputParameters.channelCount = g_impulse->numChannels;
 	outputParameters.sampleFormat = paFloat32;
 	outputParameters.suggestedLatency = Pa_GetDeviceInfo(
 			outputParameters.device)->defaultLowOutputLatency;
@@ -1068,19 +1097,17 @@ audioData *resynthesizeImpulse(audioData *currentImpulse) {
 // name: hanning()
 // desc: make window
 //-----------------------------------------------------------------------------
-void create_hanning( float * window, unsigned long length )
-{
-   unsigned long i;
-   double pi, phase = 0, delta;
+void create_hanning(float * window, unsigned long length) {
+	unsigned long i;
+	double pi, phase = 0, delta;
 
-   pi = 4.*atan(1.0);
-   delta = 2 * pi / (double) length;
+	pi = 4. * atan(1.0);
+	delta = 2 * pi / (double) length;
 
-   for( i = 0; i < length; i++ )
-   {
-       window[i] = (float)(0.5 * (1.0 - cos(phase)));
-       phase += delta;
-   }
+	for (i = 0; i < length; i++) {
+		window[i] = (float) (0.5 * (1.0 - cos(phase)));
+		phase += delta;
+	}
 }
 
 void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
@@ -1124,7 +1151,7 @@ void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
 audioData *synthesizeImpulse(char *fileName) {
 
 // Preliminary calculations/processes
-	audioData *impulse_from_file = fileToBuffer("churchIR.wav");
+	audioData *impulse_from_file = fileToBuffer(fileName);
 	audioData *synth_impulse = (audioData *) malloc(sizeof(audioData));
 	int length_before_zero_padding = impulse_from_file->numFrames;
 	zeroPadToNextPowerOfTwo(impulse_from_file);
@@ -1195,14 +1222,15 @@ audioData *synthesizeImpulse(char *fileName) {
  */
 void loadImpulse(char *name) {
 
-	impulse = synthesizeImpulse(name);
+	g_impulse = synthesizeImpulse(name);
 //	impulse = fileToBuffer("churchIR.wav");
-	impulse = zeroPadToNextPowerOfTwo(impulse);
-	g_impulse_length = impulse->numFrames;
-	Vector blockLengthVector = determineBlockLengths(impulse);
-	BlockData* data_ptr = allocateBlockBuffers(blockLengthVector, impulse);
-	partitionImpulseIntoBlocks(blockLengthVector, data_ptr, impulse);
-	g_fftData_ptr = allocateFFTBuffers(data_ptr, blockLengthVector, impulse);
+	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
+	g_impulse_length = g_impulse->numFrames;
+	Vector blockLengthVector = determineBlockLengths(g_impulse);
+	BlockData* data_ptr = allocateBlockBuffers(blockLengthVector, g_impulse);
+	partitionImpulseIntoBlocks(blockLengthVector, data_ptr, g_impulse);
+	g_fftData_ptr = allocateFFTBuffers(data_ptr, blockLengthVector, g_impulse);
+
 }
 
 /*
@@ -1218,11 +1246,28 @@ void initializePowerOf2Vector() {
 }
 
 /*
+ * This function reloads an impulse after changes have been made
+ */
+void reloadImpulse() {
+	free_audioData(g_impulse);
+	g_impulse = synthesizeImpulse("churchIR.wav");
+	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
+	g_impulse_length = g_impulse->numFrames;
+	Vector blockLengthVector = determineBlockLengths(g_impulse);
+	BlockData* data_ptr = allocateBlockBuffers(blockLengthVector, g_impulse);
+	partitionImpulseIntoBlocks(blockLengthVector, data_ptr, g_impulse);
+	free(g_fftData_ptr);
+	g_fftData_ptr = allocateFFTBuffers(data_ptr, blockLengthVector, g_impulse);
+	initializeGlobalParameters();
+	initializePowerOf2Vector();
+}
+
+/*
  * Main function.
  */
 int main(int argc, char **argv) {
 
-	loadImpulse("churchIR.wav");
+	loadImpulse("BlauPunkt.wav");
 
 //	printf("Block duration in nanoseconds: %lu\n",
 //			g_block_duration_in_nanoseconds);

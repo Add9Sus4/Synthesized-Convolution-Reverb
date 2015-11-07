@@ -17,6 +17,12 @@
 #include "dawsonaudio.h"
 #include "convolve.h"
 
+void free_audioData(audioData *audio) {
+	if (audio) {
+		free(audio);
+	}
+}
+
 // This function takes a buffer, finds its maximum absolute value, and normalizes it so that the maximum
 // is 1 (or -1)
 float *normalizeBuffer(float *buffer, int length) {
@@ -221,12 +227,12 @@ audioData *zeroPadToNextPowerOfTwo(audioData *audio) {
 		float *newLeftBuffer = (float *) calloc(newLength, sizeof(float));
 		float *newRightBuffer = (float *) calloc(newLength, sizeof(float));
 
-		for (i=0; i<newLength; i++) {
+		for (i = 0; i < newLength; i++) {
 			newLeftBuffer[i] = 0.0f;
 			newRightBuffer[i] = 0.0f;
 		}
 
-		for (i=0; i<audio->numFrames; i++) {
+		for (i = 0; i < audio->numFrames; i++) {
 			newLeftBuffer[i] = audio->buffer1[i];
 			newRightBuffer[i] = audio->buffer2[i];
 		}
