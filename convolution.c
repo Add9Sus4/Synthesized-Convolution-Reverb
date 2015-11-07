@@ -70,6 +70,8 @@ int crossover_length = 200 * SAMPLES_PER_MS;
 // Location of point at which crossover between synthesized and recorded impulse begins
 int crossover_point = 50 * SAMPLES_PER_MS;
 
+int g_changes_made = 0;
+
 float synthesized_impulse_gain_factor = 0.4f;
 
 bool use_attack_from_impulse = true;
@@ -206,6 +208,7 @@ void keyboardFunc(unsigned char key, int x, int y) {
 		break;
 	case 'r':
 		printf("reloading impulse...\n");
+		g_changes_made++;
 		changingImpulse = true;
 		reloadImpulse();
 		changingImpulse = false;
@@ -402,6 +405,8 @@ void displayFunc() {
  */
 void *calculateFFT(void *incomingFFTArgs) {
 
+	int state = g_changes_made;
+
 	FFTArgs *fftArgs = (FFTArgs *) incomingFFTArgs;
 
 	int i;
@@ -458,7 +463,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 
 		for (i = 0; i < convLength; i++) {
 
-			if (changingImpulse) {
+			if (changingImpulse || g_changes_made != state) {
 				free(convResult);
 				free(temp);
 				free(inputAudio);
@@ -645,8 +650,14 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 			g_output_storage_buffer2[i] = g_output_storage_buffer2[i
 					+ g_block_length];
 		}
+
 	} else {
-		for (i=0; i<framesPerBuffer; i++) {
+
+		/*
+		 * If the impulse is being changed, send zeros to the output rather than
+		 * hearing a glitch in the audio
+		 */
+		for (i = 0; i < framesPerBuffer; i++) {
 			outBuf[i] = 0.0f;
 		}
 	}
@@ -1250,7 +1261,7 @@ void initializePowerOf2Vector() {
  */
 void reloadImpulse() {
 	free_audioData(g_impulse);
-	g_impulse = synthesizeImpulse("churchIR.wav");
+	g_impulse = synthesizeImpulse("BlauPunkt.wav");
 	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
 	g_impulse_length = g_impulse->numFrames;
 	Vector blockLengthVector = determineBlockLengths(g_impulse);
@@ -1267,7 +1278,7 @@ void reloadImpulse() {
  */
 int main(int argc, char **argv) {
 
-	loadImpulse("BlauPunkt.wav");
+	loadImpulse("churchIR.wav");
 
 //	printf("Block duration in nanoseconds: %lu\n",
 //			g_block_duration_in_nanoseconds);
