@@ -76,6 +76,10 @@ float synthesized_impulse_gain_factor = 0.4f;
 
 bool use_attack_from_impulse = true;
 
+bool smooth_draw = true;
+
+int smooth_draw_amt = 5;
+
 bool changingImpulse = false;
 
 unsigned int g_channels = MONO;
@@ -219,6 +223,19 @@ void keyboardFunc(unsigned char key, int x, int y) {
 	case 'q':
 		exit(0);
 		break;
+	case 'p':
+		if (smooth_draw && smooth_draw_amt < HALF_FFT_SIZE / 8) {
+			smooth_draw_amt++;
+			printf("smooth_draw_amt: %d\n", smooth_draw_amt);
+		}
+		break;
+	case 'o':
+		if (smooth_draw && smooth_draw_amt > 3) {
+			smooth_draw_amt--;
+			printf("smooth_draw_amt: %d\n", smooth_draw_amt);
+		}
+		break;
+
 	case 'a':
 		a_pressed = true;
 //		printf("'a' has been pressed.\n");
@@ -338,8 +355,10 @@ void displayFunc() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	// draw view here
+	// If the mouse is in the drawing area
 	if ((int) g_mouse_x
 			>= 0&& (int) g_mouse_x < HALF_FFT_SIZE && a_pressed == true) {
+
 		float value = g_mouse_y - g_height_top;
 		if (value > 0.0f) {
 			value = 0.0f;
@@ -348,11 +367,62 @@ void displayFunc() {
 				< (g_height_top
 						- (g_height_bottom + bottom_vals[(int) g_mouse_x]))
 						* -1) {
+
 			value = (g_height_top
 					- (g_height_bottom + bottom_vals[(int) g_mouse_x])) * -1;
+
 		}
 //		printf("g_mouse_y: %f, value: %f\n", g_mouse_y, value);
 		top_vals[(int) g_mouse_x] = value;
+
+		// If smooth draw is activated
+		if (smooth_draw) {
+
+			// If the mouse is in the center of the drawing area
+			if ((int) g_mouse_x + smooth_draw_amt < HALF_FFT_SIZE
+					&& (int) g_mouse_x - smooth_draw_amt >= 0) {
+
+				float val_to_the_right = top_vals[(int) g_mouse_x
+						+ smooth_draw_amt];
+				float val_to_the_left = top_vals[(int) g_mouse_x
+						- smooth_draw_amt];
+
+				float inc_right = (val_to_the_right - value) / smooth_draw_amt;
+				float inc_left = (val_to_the_left - value) / smooth_draw_amt;
+
+				for (i = 1; i < smooth_draw_amt + 1; i++) {
+					top_vals[(int) g_mouse_x + i] = value + i * inc_right;
+					top_vals[(int) g_mouse_x - i] = value + i * inc_left;
+				}
+			}
+			// If the mouse is near the right edge of the drawing area
+			else if ((int) g_mouse_x + smooth_draw_amt >= HALF_FFT_SIZE) {
+
+				float edge_val = top_vals[HALF_FFT_SIZE - 1];
+				float val_to_the_left = top_vals[HALF_FFT_SIZE - 1
+						- smooth_draw_amt];
+
+				float inc = (edge_val - val_to_the_left) / smooth_draw_amt;
+
+				for (i = 1; i < smooth_draw_amt + 1; i++) {
+					top_vals[HALF_FFT_SIZE - 1 - i] = edge_val - i * inc;
+				}
+
+			} else if ((int) g_mouse_x - smooth_draw_amt < 0) {
+
+				float edge_val = top_vals[0];
+				float val_to_the_right = top_vals[smooth_draw_amt];
+
+				float inc = (edge_val - val_to_the_right) / smooth_draw_amt;
+
+				for (i = 1; i < smooth_draw_amt + 1; i++) {
+					top_vals[i] = edge_val - i * inc;
+				}
+
+			}
+
+		}
+
 	}
 
 	if ((int) g_mouse_x
@@ -1221,7 +1291,8 @@ audioData *resynthesizeImpulse(audioData *currentImpulse) {
 	if (currentImpulse->numChannels == 1) {
 
 		//TODO: Create new exponential fit data based on top_vals and bottom_vals, not on impulse data.
-		float **exp_fit = getExponentialFitFromGraph(currentImpulse->numFrames / FFT_SIZE);
+		float **exp_fit = getExponentialFitFromGraph(
+				currentImpulse->numFrames / FFT_SIZE);
 
 		setTopValsBasedOnImpulseFFTBlocks(exp_fit);
 
