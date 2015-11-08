@@ -132,6 +132,7 @@ void keyboardUpFunc(unsigned char, int, int);
 void initialize_graphics();
 void initialize_glut(int argc, char *argv[]);
 void reloadImpulse();
+float **getExponentialFitFromGraph(int num_impulse_blocks);
 
 void initializeGlobalParameters() {
 	g_block_length = MIN_FFT_BLOCK_SIZE;
@@ -210,6 +211,7 @@ void keyboardFunc(unsigned char key, int x, int y) {
 		printf("reloading impulse...\n");
 		g_changes_made++;
 		changingImpulse = true;
+//		getExponentialFitFromGraph(g_impulse->numFrames / FFT_SIZE);
 		reloadImpulse();
 		changingImpulse = false;
 		printf("impulse reloaded\n");
@@ -788,6 +790,84 @@ float **getImpulseFFTBlocks(audioData *impulse_from_file) {
 	return impulse_filter_env_blocks;
 }
 
+//-----------------------------------------------------------------------------
+// name: hanning()
+// desc: make window
+//-----------------------------------------------------------------------------
+void create_hanning(float * window, unsigned long length) {
+	unsigned long i;
+	double pi, phase = 0, delta;
+
+	pi = 4. * atan(1.0);
+	delta = 2 * pi / (double) length;
+
+	for (i = 0; i < length; i++) {
+		window[i] = (float) (0.5 * (1.0 - cos(phase)));
+		phase += delta;
+	}
+}
+
+float **getExponentialFitFromGraph(int num_impulse_blocks) {
+
+	int i, j;
+
+	float **impulse_filter_env_blocks_exp_fit = (float **) malloc(
+			sizeof(float *) * HALF_FFT_SIZE);
+
+	for (i = 0; i < HALF_FFT_SIZE; i++) {
+		impulse_filter_env_blocks_exp_fit[i] = (float *) calloc(
+				num_impulse_blocks, sizeof(float));
+	}
+
+	float *x = (float *) malloc(sizeof(float) * num_impulse_blocks);
+
+	for (i = 0; i < num_impulse_blocks; i++) {
+		x[i] = i;
+	}
+
+//	printf("x2: %d\n", (num_impulse_blocks-1));
+
+	for (i = 0; i < HALF_FFT_SIZE; i++) {
+		float y1 = (top_vals[i] + (g_height_top - g_height_bottom)) * g_max
+				/ (g_height_top - g_height_bottom);
+		float y2 = bottom_vals[i];
+//		float x1 = 0.0f;
+		float x2 = num_impulse_blocks - 1;
+
+//		float sum_x = x2 + x1;
+//		float sum_temp = y1 + y2;
+//		float sum_x_times_x = pow(x1, 2) + pow(x2, 2);
+//		float sum_temp_times_x = x1 * y1 + x2 * y2;
+//
+//		float b = (2 * sum_temp_times_x - sum_x * sum_temp)
+//				/ (2 * sum_x_times_x - sum_x * sum_x);
+//		float a = (sum_temp - b * sum_x) / 2;
+//
+//		float A = exp(a);
+//
+		float a = y1;
+
+		float b = pow((y2 / a), (1 / x2));
+
+//		printf("y1: %f, y2: %f, b: %f\n", y1, y2, b);
+
+//		printf(
+//				"top_vals[i]: %f, y1: %f, y2: %f, x1: %f, x2: %f, b: %f, a: %f, A: %f\n",
+//				top_vals[i], y1, y2, x1, x2, b, a, A);
+
+		for (j = 0; j < num_impulse_blocks; j++) {
+			impulse_filter_env_blocks_exp_fit[i][j] = a * pow(b, x[j]);
+//			if (i == 0) {
+//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
+//						impulse_filter_env_blocks_exp_fit[i][j]);
+//			}
+		}
+
+	}
+
+	return impulse_filter_env_blocks_exp_fit;
+}
+
 /*
  * This function takes the frequency data of an impulse, computes best-fit exponential
  * functions for each frequency bin over time, and returns the values calculated from
@@ -847,12 +927,18 @@ float **getExponentialFitForImpulseFFTBlocks(int num_impulse_blocks,
 		for (j = 0; j < num_impulse_blocks; j++) {
 
 			impulse_filter_env_blocks_exp_fit[i][j] = A * exp(b * x[j]);
+//			if (i == 0) {
+//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
+//						impulse_filter_env_blocks_exp_fit[i][j]);
+//			}
 		}
+
 		if (g_max < impulse_filter_env_blocks_exp_fit[i][0]) {
 			g_max = impulse_filter_env_blocks_exp_fit[i][0];
 		}
 
 	}
+
 	return impulse_filter_env_blocks_exp_fit;
 }
 
@@ -1072,9 +1158,50 @@ void setTopValsBasedOnImpulseFFTBlocks(
 	int i;
 
 	for (i = 0; i < FFT_SIZE / 2; i++) {
+
 		top_vals[i] = ((g_height_top - g_height_bottom)
 				- (impulse_filter_env_blocks_exp_fit[i][0]
 						* (g_height_top - g_height_bottom) / g_max)) * -1;
+
+//		printf("exp_fit_val[%d][0]: %f, top_vals[%d]: %f\n", i, impulse_filter_env_blocks_exp_fit[i][0], i, top_vals[i]);
+
+		bottom_vals[i] = 0.0001f;
+
+	}
+}
+
+void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
+		audioData* impulse_from_file) {
+
+	int i;
+
+	if (!use_attack_from_impulse) {
+		return;
+	}
+
+// Create window for use in crossfading
+	float *window = (float *) malloc(sizeof(float) * crossover_length * 2);
+	create_hanning(window, crossover_length * 2);
+
+// Use original impulse up until crossover point
+	for (i = 0; i < crossover_point; i++) {
+		synthesized_impulse_buffer[i] = impulse_from_file->buffer1[i];
+	}
+
+// Fade between original and synthesized impulse over crossover length
+	for (i = 0; i < crossover_length; i++) {
+
+		// Use second half of hanning window to fade out original component
+		float original_component = impulse_from_file->buffer1[crossover_point
+				+ i] * window[crossover_length + i];
+
+		// Use first half of hanning window to fade in synthesized component
+		float synthesized_component = synthesized_impulse_buffer[crossover_point
+				+ i] * window[i];
+
+		// Sum the two together to complete the crossfade
+		synthesized_impulse_buffer[crossover_point + i] = original_component
+				+ synthesized_component;
 	}
 }
 
@@ -1094,66 +1221,50 @@ audioData *resynthesizeImpulse(audioData *currentImpulse) {
 	if (currentImpulse->numChannels == 1) {
 
 		//TODO: Create new exponential fit data based on top_vals and bottom_vals, not on impulse data.
+		float **exp_fit = getExponentialFitFromGraph(currentImpulse->numFrames / FFT_SIZE);
+
+		setTopValsBasedOnImpulseFFTBlocks(exp_fit);
 
 		//Then, filter white noise with this exponential fit data.
+		float *synthesized_impulse_buffer = getFilteredWhiteNoise(
+				currentImpulse, exp_fit);
 
 		//Then, apply amp envelope.
+		applyAmplitudeEnvelope(currentImpulse, synthesized_impulse_buffer,
+				g_amp_envelope);
+
+		// crossfade between recorded impulse attack and synthesized tail
+		crossfadeRecordedAndSynthesizedImpulses(synthesized_impulse_buffer,
+				currentImpulse);
+
+		// Write to a wav file
+		writeWavFile(synthesized_impulse_buffer, SAMPLE_RATE,
+				currentImpulse->numChannels, currentImpulse->numFrames, 1,
+				"11_7_2015_test.wav");
+
+		// Put synthesized impulse in audioData struct
+		synth_impulse->buffer1 = synthesized_impulse_buffer;
+		synth_impulse->numChannels = currentImpulse->numChannels;
+		synth_impulse->numFrames = currentImpulse->numFrames;
+		synth_impulse->sampleRate = SAMPLE_RATE;
 	}
+	int i;
+	float max = 0.0f;
+	for (i = 0; i < synth_impulse->numFrames; i++) {
+		if (fabsf(synth_impulse->buffer1[i]) > max) {
+			max = fabsf(synth_impulse->buffer1[i]);
+		}
+	}
+
+	for (i = 0; i < synth_impulse->numFrames; i++) {
+		synth_impulse->buffer1[i] /= max;
+	}
+
+	free(g_impulse);
+	g_impulse = synth_impulse;
 
 //Then, recalculate all the stuff in loadImpulse() based on the resynthesized impulse.
 	return synth_impulse;
-}
-
-//-----------------------------------------------------------------------------
-// name: hanning()
-// desc: make window
-//-----------------------------------------------------------------------------
-void create_hanning(float * window, unsigned long length) {
-	unsigned long i;
-	double pi, phase = 0, delta;
-
-	pi = 4. * atan(1.0);
-	delta = 2 * pi / (double) length;
-
-	for (i = 0; i < length; i++) {
-		window[i] = (float) (0.5 * (1.0 - cos(phase)));
-		phase += delta;
-	}
-}
-
-void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
-		audioData* impulse_from_file) {
-
-	int i;
-
-	if (!use_attack_from_impulse) {
-		return;
-	}
-
-	// Create window for use in crossfading
-	float *window = (float *) malloc(sizeof(float) * crossover_length * 2);
-	create_hanning(window, crossover_length * 2);
-
-	// Use original impulse up until crossover point
-	for (i = 0; i < crossover_point; i++) {
-		synthesized_impulse_buffer[i] = impulse_from_file->buffer1[i];
-	}
-
-	// Fade between original and synthesized impulse over crossover length
-	for (i = 0; i < crossover_length; i++) {
-
-		// Use second half of hanning window to fade out original component
-		float original_component = impulse_from_file->buffer1[crossover_point
-				+ i] * window[crossover_length + i];
-
-		// Use first half of hanning window to fade in synthesized component
-		float synthesized_component = synthesized_impulse_buffer[crossover_point
-				+ i] * window[i];
-
-		// Sum the two together to complete the crossfade
-		synthesized_impulse_buffer[crossover_point + i] = original_component
-				+ synthesized_component;
-	}
 }
 
 /*
@@ -1260,8 +1371,8 @@ void initializePowerOf2Vector() {
  * This function reloads an impulse after changes have been made
  */
 void reloadImpulse() {
-	free_audioData(g_impulse);
-	g_impulse = synthesizeImpulse("BlauPunkt.wav");
+//	free_audioData(g_impulse);
+	g_impulse = resynthesizeImpulse(g_impulse);
 	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
 	g_impulse_length = g_impulse->numFrames;
 	Vector blockLengthVector = determineBlockLengths(g_impulse);
