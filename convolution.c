@@ -340,7 +340,7 @@ void initialize_graphics() {
 }
 
 void displayFunc() {
-	int i;
+	int i, j;
 
 	float x_location;
 
@@ -425,43 +425,96 @@ void displayFunc() {
 
 	}
 
-	if ((int) g_mouse_x
-			>= 0&& (int) g_mouse_x < HALF_FFT_SIZE && z_pressed == true) {
-		float value = g_mouse_y + g_height_bottom;
-		if (value < (g_height_top - g_height_bottom) * -1) {
-			value = (g_height_top - g_height_bottom) * -1;
-		}
-		if (value
-				> (g_height_top + top_vals[(int) g_mouse_x] + g_height_bottom)) {
-			value = g_height_top + top_vals[(int) g_mouse_x] + g_height_bottom;
-		}
+//	if ((int) g_mouse_x
+//			>= 0&& (int) g_mouse_x < HALF_FFT_SIZE && z_pressed == true) {
+//		float value = g_mouse_y + g_height_bottom;
+//		if (value < (g_height_top - g_height_bottom) * -1) {
+//			value = (g_height_top - g_height_bottom) * -1;
+//		}
+//		if (value
+//				> (g_height_top + top_vals[(int) g_mouse_x] + g_height_bottom)) {
+//			value = g_height_top + top_vals[(int) g_mouse_x] + g_height_bottom;
+//		}
+//
+//		value += (g_height_top - g_height_bottom);
+//
+//		bottom_vals[(int) g_mouse_x] = value;
+//	}
 
-		value += (g_height_top - g_height_bottom);
+//	glPushMatrix();
+//	{
+//		glBegin(GL_LINE_STRIP);
+//		for (i = 0; i < HALF_FFT_SIZE; i++) {
+//			x_location = (float) i * g_relative_width / FFT_SIZE * 2
+//					- g_relative_width / 2;
+//			glColor3f(0.4f, 0.7f, 1.0f);
+//			glVertex3f(x_location, g_height_top + top_vals[i], 0.0f);
+//		}
+//		glEnd();
+//	}
+//	glPopMatrix();
 
-		bottom_vals[(int) g_mouse_x] = value;
+	// Draw y axis
+	glPushMatrix();
+	{
+		x_location = -g_relative_width / 2;
+		glBegin(GL_LINE_STRIP);
+		glColor3f(0.05f, 0.1f, 0.08f);
+		glVertex3f(x_location, g_height_top, 0.0f);
+		glVertex3f(x_location, g_height_bottom, 0.0f);
+		glEnd();
+
+		x_location = (float) (HALF_FFT_SIZE - 1) * g_relative_width / FFT_SIZE
+				* 2 - g_relative_width / 2;
+		glBegin(GL_LINE_STRIP);
+//		glColor3f(0.4f, 0.7f, 1.0f);
+		glVertex3f(x_location, g_height_top, 0.0f);
+		glVertex3f(x_location, g_height_bottom, 0.0f);
+		glEnd();
 	}
+	glPopMatrix();
 
+	// Draw x axis
 	glPushMatrix();
 	{
 		glBegin(GL_LINE_STRIP);
 		for (i = 0; i < HALF_FFT_SIZE; i++) {
 			x_location = (float) i * g_relative_width / FFT_SIZE * 2
 					- g_relative_width / 2;
-			glVertex3f(x_location, g_height_top + top_vals[i], 0.0f);
+//			glColor3f(0.4f, 0.7f, 1.0f);
+			glVertex3f(x_location, g_height_bottom, 0.0f);
+		}
+		glEnd();
+
+		glBegin(GL_LINE_STRIP);
+		for (i = 0; i < HALF_FFT_SIZE; i++) {
+			x_location = (float) i * g_relative_width / FFT_SIZE * 2
+					- g_relative_width / 2;
+//			glColor3f(0.4f, 0.7f, 1.0f);
+			glVertex3f(x_location, g_height_top, 0.0f);
 		}
 		glEnd();
 	}
 	glPopMatrix();
 
+	// Draw impulse
 	glPushMatrix();
 	{
-		glBegin(GL_LINE_STRIP);
 		for (i = 0; i < HALF_FFT_SIZE; i++) {
 			x_location = (float) i * g_relative_width / FFT_SIZE * 2
 					- g_relative_width / 2;
-			glVertex3f(x_location, g_height_bottom + bottom_vals[i], 0.0f);
+			float inc = (top_vals[i] + (g_height_top - g_height_bottom)) / 100;
+//			printf("i = %d, inc: %f\n", i, inc);
+			glBegin(GL_LINE_STRIP);
+			for (j = 0; j < 100; j++) {
+				glColor3f((float) j * 0.4 / 100, (float) j * 0.7 / 100,
+						(float) j / 100);
+//				printf("top_vals: %f, bottom_vals: %f, i: %d, j: %d, inc: %f, x_location: %f, y_location: %f\n", top_vals[i], bottom_vals[i], i, j, inc, x_location, g_height_top + top_vals[i] - (float) j * inc);
+				glVertex3f(x_location,
+						g_height_top + top_vals[i] - (float) j * inc, 0.0f);
+			}
+			glEnd();
 		}
-		glEnd();
 	}
 	glPopMatrix();
 
@@ -493,8 +546,8 @@ void *calculateFFT(void *incomingFFTArgs) {
 
 	pthread_detach(pthread_self());
 
-	//	 1. Create buffer with length = 2 * (last_sample_index - first_sample_index),
-	//	    fill the buffer with 0s.
+//	 1. Create buffer with length = 2 * (last_sample_index - first_sample_index),
+//	    fill the buffer with 0s.
 	int blockLength = fftArgs->last_sample_index - fftArgs->first_sample_index
 			+ 1;
 	int convLength = blockLength * 2;
@@ -502,28 +555,28 @@ void *calculateFFT(void *incomingFFTArgs) {
 	int volumeFactor = blockLength / g_block_length; // 1, 2, 4, 8, etc
 
 	complex *inputAudio = calloc(convLength, sizeof(complex));
-	// 2. Take audio from g_input_storage_buffer (first_sample_index to last_sample_index)
-	//    and place it into the buffer created in part 1 (0 to (last_sample_index - first_sample_index)).
+// 2. Take audio from g_input_storage_buffer (first_sample_index to last_sample_index)
+//    and place it into the buffer created in part 1 (0 to (last_sample_index - first_sample_index)).
 	for (i = 0; i < blockLength; i++) {
 		inputAudio[i].Re = g_input_storage_buffer[fftArgs->first_sample_index
 				+ i];
 	}
 
-	//	printf(
-	//			"Thread %d: Start convolving sample %d to %d with h%d. This process will take %d cycles and complete when N = %d.\n",
-	//			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
-	//			fftArgs->impulse_block_number, numCyclesToWait + 1, counter_target);
+//	printf(
+//			"Thread %d: Start convolving sample %d to %d with h%d. This process will take %d cycles and complete when N = %d.\n",
+//			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
+//			fftArgs->impulse_block_number, numCyclesToWait + 1, counter_target);
 
-	// 3. Take the FFT of the buffer created in part 1.
+// 3. Take the FFT of the buffer created in part 1.
 	complex *temp = calloc(convLength, sizeof(complex));
 	fft(inputAudio, convLength, temp);
 
-	// 4. Determine correct impulse FFT block based in impulse_block_number. The length of this
-	//	  block should automatically be the same length as the length of the buffer created in part 1
-	//    that now holds the input audio data.
+// 4. Determine correct impulse FFT block based in impulse_block_number. The length of this
+//	  block should automatically be the same length as the length of the buffer created in part 1
+//    that now holds the input audio data.
 	int fftBlockNumber = fftArgs->impulse_block_number;
 
-	// If the impulse is mono
+// If the impulse is mono
 	if (g_impulse->numChannels == MONO) {
 
 		// 5. Create buffer of length 2 * (last_sample_index - first_sample_index) to hold the result of
@@ -571,7 +624,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 
 	}
 
-	// If the impulse is stereo
+// If the impulse is stereo
 	if (g_impulse->numChannels == STEREO) {
 
 		// 5. Create buffer of length 2 * (last_sample_index - first_sample_index) to hold the result of
@@ -626,7 +679,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 //			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
 //			fftArgs->impulse_block_number, counter_target);
 
-	// Free remaining buffers
+// Free remaining buffers
 	free(temp);
 	free(inputAudio);
 
@@ -816,11 +869,11 @@ float **getImpulseFFTBlocks(audioData *impulse_from_file) {
 	 */
 	int num_impulse_blocks = (impulse_from_file->numFrames / FFT_SIZE);
 
-	// Allocate memory for array of filter envelope blocks
+// Allocate memory for array of filter envelope blocks
 	float **impulse_filter_env_blocks = (float **) malloc(
 			sizeof(float *) * num_impulse_blocks);
 
-	// Allocate memory each individual filter envelope
+// Allocate memory each individual filter envelope
 	for (i = 0; i < num_impulse_blocks; i++) {
 		impulse_filter_env_blocks[i] = (float *) malloc(
 				sizeof(float) * FFT_SIZE);
@@ -1121,7 +1174,8 @@ float *getExponentialFitForAmplitudeEnvelope(float *envelope,
 float *getFilteredWhiteNoise(audioData *impulse_from_file,
 		float **impulse_filter_env_blocks_exp_fit) {
 	int i, j;
-// Buffer to hold processed audio
+
+	// Buffer to hold processed audio
 	float *synthesized_impulse_buffer = (float *) calloc(
 			impulse_from_file->numFrames, sizeof(float));
 
@@ -1130,16 +1184,16 @@ float *getFilteredWhiteNoise(audioData *impulse_from_file,
 	for (i = 0; i < numBlocks; i++) {
 
 		// Allocate memory for FFT
-		complex *fftBlock = (complex *) calloc(FFT_SIZE, sizeof(complex));
-		complex *temp = (complex *) calloc(FFT_SIZE, sizeof(complex));
+		complex *fftBlock = (complex *) calloc(FFT_SIZE * 2, sizeof(complex));
+		complex *temp = (complex *) calloc(FFT_SIZE * 2, sizeof(complex));
 
 		// Put white noise into fft buffer
-		for (j = 0; j < FFT_SIZE; j++) {
+		for (j = 0; j < FFT_SIZE * 2; j++) {
 			fftBlock[j].Re = ((float) rand() / RAND_MAX) * 2.0f - 1.0f;
 		}
 
 		// Take FFT of block
-		fft(fftBlock, FFT_SIZE, temp);
+		fft(fftBlock, FFT_SIZE * 2, temp);
 
 		/*
 		 * Actually apply frequency-domain filter
@@ -1147,34 +1201,51 @@ float *getFilteredWhiteNoise(audioData *impulse_from_file,
 		for (j = 0; j < FFT_SIZE; j++) {
 
 			if (j < FFT_SIZE / 2) {
-				fftBlock[j].Re *= impulse_filter_env_blocks_exp_fit[j][i];
-				fftBlock[j].Im *= impulse_filter_env_blocks_exp_fit[j][i];
+				fftBlock[2 * j].Re *= impulse_filter_env_blocks_exp_fit[j][i];
+				fftBlock[2 * j + 1].Re *=
+						impulse_filter_env_blocks_exp_fit[j][i];
+				fftBlock[2 * j].Im *= impulse_filter_env_blocks_exp_fit[j][i];
+				fftBlock[2 * j + 1].Im *=
+						impulse_filter_env_blocks_exp_fit[j][i];
 			} else {
-				fftBlock[j].Re *= impulse_filter_env_blocks_exp_fit[FFT_SIZE - j
-						- 1][i];
-				fftBlock[j].Im *= impulse_filter_env_blocks_exp_fit[FFT_SIZE - j
-						- 1][i];
+				fftBlock[2 * j].Re *= impulse_filter_env_blocks_exp_fit[FFT_SIZE
+						- j - 1][i];
+				fftBlock[2 * j + 1].Re *=
+						impulse_filter_env_blocks_exp_fit[FFT_SIZE - j - 1][i];
+				fftBlock[2 * j].Im *= impulse_filter_env_blocks_exp_fit[FFT_SIZE
+						- j - 1][i];
+				fftBlock[2 * j + 1].Im *=
+						impulse_filter_env_blocks_exp_fit[FFT_SIZE - j - 1][i];
 			}
 
 		}
 
-		ifft(fftBlock, FFT_SIZE, temp);
+		ifft(fftBlock, FFT_SIZE * 2, temp);
 
-		float *fftBlock_float = (float *) malloc(sizeof(float) * FFT_SIZE);
+		float *fftBlock_float = (float *) malloc(sizeof(float) * FFT_SIZE * 2);
 
-		for (j = 0; j < FFT_SIZE; j++) {
+		for (j = 0; j < FFT_SIZE * 2; j++) {
 
 			fftBlock_float[j] = fftBlock[j].Re;
 
 		}
 
-		for (j = 0; j < FFT_SIZE; j++) {
-			synthesized_impulse_buffer[i * FFT_SIZE + j] += fftBlock_float[j];
+		float *window = (float *) malloc(sizeof(float) * FFT_SIZE * 2);
+		hanning(window, FFT_SIZE * 2);
+
+		for (j = 0; j < FFT_SIZE * 2; j++) {
+
+			if (i * FFT_SIZE + j < impulse_from_file->numFrames) {
+				synthesized_impulse_buffer[i * FFT_SIZE + j] +=
+						fftBlock_float[j] * window[j];
+			}
+
 		}
 
 		free(temp);
 		free(fftBlock_float);
 		free(fftBlock);
+		free(window);
 
 	}
 	return synthesized_impulse_buffer;
@@ -1204,7 +1275,7 @@ void applyAmplitudeEnvelope(audioData *impulse_from_file,
 	 */
 	for (i = 0; i < impulse_from_file->numFrames; i++) {
 
-		synthesized_impulse_buffer[i] *= differences[i];
+//		synthesized_impulse_buffer[i] *= differences[i];
 
 		if (fabsf(synthesized_impulse_buffer[i]) > output_max) {
 			output_max = fabsf(synthesized_impulse_buffer[i]);
@@ -1311,7 +1382,7 @@ audioData *resynthesizeImpulse(audioData *currentImpulse) {
 		// Write to a wav file
 		writeWavFile(synthesized_impulse_buffer, SAMPLE_RATE,
 				currentImpulse->numChannels, currentImpulse->numFrames, 1,
-				"11_7_2015_test.wav");
+				"11_10_2015_test.wav");
 
 		// Put synthesized impulse in audioData struct
 		synth_impulse->buffer1 = synthesized_impulse_buffer;
