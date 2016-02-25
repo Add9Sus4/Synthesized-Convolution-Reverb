@@ -28,7 +28,7 @@ all: Convolution
 Convolution: $(OBJS) $(USER_OBJS)
 	@echo 'Building target: $@'
 	@echo 'Invoking: MacOS X C Linker'
-	gcc -framework OpenGL -framework GLUT -Wno-deprecated-declarations -o "Convolution" $(OBJS) $(USER_OBJS) $(LIBS)
+	gcc  -o "Convolution" $(OBJS) $(USER_OBJS) $(LIBS)
 	@echo 'Finished building target: $@'
 	@echo ' '
 

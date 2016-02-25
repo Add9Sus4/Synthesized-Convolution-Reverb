@@ -8,7 +8,7 @@
 #ifndef _CONVOLVE_H_
 #define _CONVOLVE_H_
 
-typedef struct{float Re; float Im;} complex;
+typedef struct complex {float Re; float Im;} complex;
 
 complex complex_mult(complex a, complex b);
 

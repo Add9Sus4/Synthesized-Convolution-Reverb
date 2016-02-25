@@ -12,7 +12,7 @@
 
 
 // complex type
-typedef struct { float re ; float im ; } complex;
+//typedef struct { float re ; float im ; } complex;
 
 // complex absolute value
 #define cmp_abs(x) ( sqrt( (x).re * (x).re + (x).im * (x).im ) )
