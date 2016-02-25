@@ -22,7 +22,7 @@ changes they have made.
 
 ##### Impulse types
 
-The project currently works for mono and stereo impulses. Audio I/O is performed using the libsndfile library, so all
+The project currently works for mono and stereo impulses. Audio I/O is performed using the [libsndfile](http://www.mega-nerd.com/libsndfile/) library, so all
 file formats supported by [libsndfile](http://www.mega-nerd.com/libsndfile/) should in theory work for this application.
 
 ##### User Interface
