@@ -137,7 +137,7 @@ user to interact with a graph.
 * Descriptive EQ
 
 Many reverb controls have EQ parameters such as 'high-shelf', 'low-shelf', and 'mid frequencies'. To make this more intuitive, I plan on having various sliders
-with common frequency-specific descriptors such as 'brightness', 'presence', '
+with common frequency-specific descriptors such as 'brightness', 'presence', 'warmth', etc, which will affect different portions of the frequency spectrum in addition to any changes the user has made directly to the spectrum.
 
 ###### Other (less drastic) improvements
 
