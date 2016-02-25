@@ -27,6 +27,8 @@ file formats supported by [libsndfile](http://www.mega-nerd.com/libsndfile/) sho
 
 ##### User Interface
 
+![](resources/SynthesizedConvolutionReverbGUI.tiff)
+
 ###### Frequency Graph
 
 The user interface displays a graph of the current impulse's frequency content. The x-axis represents ln(frequency), and

@@ -2762,7 +2762,6 @@ audioData *synthesizeImpulse(char *fileName) {
  * This function loads an impulse from a given filename
  */
 void loadImpulse(char *name) {
-
 	g_impulse = synthesizeImpulse(name);
 //	impulse = fileToBuffer("churchIR.wav");
 	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
