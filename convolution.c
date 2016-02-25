@@ -877,7 +877,7 @@ void initialize_glut(int argc, char *argv[]) {
 	// set the window postion
 	glutInitWindowPosition(100, 100);
 	// create the window
-	glutCreateWindow("Aaron Dawson's NYU Thesis (2015)");
+	glutCreateWindow("Synthesized Convolution Reverb");
 	// full screen
 	if (g_fullscreen)
 		glutFullScreen();
