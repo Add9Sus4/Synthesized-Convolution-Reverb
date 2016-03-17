@@ -13,6 +13,10 @@
 #define SAMPLES_PER_MS					SAMPLE_RATE/1000
 #define LEFT							1
 #define RIGHT							2
+#define LIVE_AUDIO_INPUT				true
+#define AUDIO_FILE_INPUT				!LIVE_AUDIO_INPUT
+#define IMPULSE_FILE_NAME				"resources/impulses/Factory Hall.wav"
+#define AUDIO_FILE_NAME					"resources/audio/sax.wav"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -71,16 +75,72 @@ float bottom_vals_right[HALF_FFT_SIZE];
 float *g_amp_envelope;
 float g_max = 0.0f;
 
+char *audio_file_name = NULL;
+
+float last_input_spectrum[15][HALF_FFT_SIZE];
+
+complex *input_spectrum;
+
+int g_dry_wet = 50;
+
+bool g_drawing = false;
+
 float g_loudest = 0.0f;
 int g_consecutive_skipped_cycles = 0;
 
 float x_values[HALF_FFT_SIZE];
 
+typedef struct GraphData
+{
+	int *x_indices;
+	float *y_values;
+	int first_index;
+	int last_index;
+	int length;
+} GraphData;
 // For displaying impulse
-int g_bottom_of_display;
-int g_top_of_display;
-int g_left_of_display;
-int g_right_of_display;
+
+typedef struct ImpulseWindow {
+	int edge_margin;
+	int margin_top;
+	int margin_bottom;
+	int margin_left;
+	int margin_right;
+	int top_line;
+	int bottom_line;
+	int mid_line;
+	float top_line_percent;
+	float mid_line_percent;
+	float bottom_line_percent;
+	bool top_line_selected;
+	bool mid_line_selected;
+	bool bottom_line_selected;
+} ImpulseWindow;
+
+ImpulseWindow *impulseWindow = NULL;
+
+typedef struct Point {
+	int x;
+	int y;
+} Point;
+
+typedef struct ImpulseHorizontalSelect {
+	Point top_left;
+	Point top_right;
+	Point bottom_left;
+	Point bottom_right;
+	int left_bound;
+	int right_bound;
+	float left_bound_percent;
+	float right_bound_percent;
+	bool left_bound_selected;
+	bool right_bound_selected;
+	bool dragging;
+	int drag_begin;
+	int drag_end;
+} ImpulseHorizontalSelect;
+
+ImpulseHorizontalSelect *impulseHorizontalSelect = NULL;
 
 // Length of crossover between synthesized and recorded impulse
 int crossover_length = 200 * SAMPLES_PER_MS;
@@ -99,6 +159,8 @@ int g_r_pressed = false;
 float synthesized_impulse_gain_factor = 0.4f;
 
 float g_interpolation_amt;
+
+int g_input_sensitivity;
 
 bool use_attack_from_impulse = true;
 
@@ -163,24 +225,42 @@ typedef struct Mouse
 
 Mouse TheMouse = {0,0,0,0,0};
 
+typedef struct {
+	float amplitude1;
+	float sampleRate;
+	SNDFILE *infile1;
+	SF_INFO sfinfo1;
+	int channels;
+	float buffer1[MIN_FFT_BLOCK_SIZE*2];
+} paData;
+
 void RecomputeImpulseButtonCallback();
 void RandomizeButtonCallback();
+void ReverseButtonCallback();
 void SmoothnessSliderCallback();
 void InterpolationSliderCallback();
 void ImpulseLengthSliderCallback();
 void ChannelSliderCallback();
+void DryWetSliderCallback();
+void InputSensitivitySliderCallback();
 
 Button RecomputeImpulseButton = {5,5,100,25,0,0," Recompute Impulse ", RecomputeImpulseButtonCallback };
 
 Button RandomizeButton = {115,5,100,25,0,0," Randomize ", RandomizeButtonCallback };
 
+Button ReverseButton = {225, 5, 100, 25, 0, 0, "Reverse Bins", ReverseButtonCallback };
+
+Slider DryWetSlider = {465, 555, 510, 65, 0, 100, 50, "Dry/Wet", 0, DryWetSliderCallback };
+
 Slider SmoothnessSlider = {15,105,60,65,1,22,12,"Smoothness",0, SmoothnessSliderCallback };
 
-Slider InterpolationSlider = {125,215,134,65,0,99,0,"Interpolation",0, InterpolationSliderCallback };
+Slider InterpolationSlider = {125,215,125,65,0,99,0,"Interpolation",0, InterpolationSliderCallback };
 
 Slider ChannelSlider;
 
 Slider ImpulseLengthSlider;
+
+Slider InputSensitivitySlider = {575, 665, 600, 65, 1, 200,0,"Input Sensitivity", 0, InputSensitivitySliderCallback };
 
 typedef struct FFTArgs {
 	int first_sample_index;
@@ -203,7 +283,7 @@ int g_end_sample; // The index of the last sample in g_storage_buffer
 int g_counter = 0; // Keep track of how many callback cycles have passed
 
 long g_block_duration_in_nanoseconds = (NANOSECONDS_IN_A_SECOND / SAMPLE_RATE)
-		* MIN_FFT_BLOCK_SIZE;
+				* MIN_FFT_BLOCK_SIZE;
 
 Vector g_powerOf2Vector; // Stores the correct number of powers of 2 to make the block calculations work (lol)
 
@@ -236,6 +316,15 @@ void initialize_graphics();
 void initialize_glut(int argc, char *argv[]);
 void reloadImpulse();
 float **getExponentialFitFromGraph(int num_impulse_blocks, int channel);
+bool mouseCloseToTopLine();
+bool mouseCloseToMidLine();
+bool mouseCloseToBottomLine();
+bool mouseCloseToALine();
+bool mouseIsInDrawingArea();
+bool mouseCloserToLeftBound();
+bool mouseCloserToRightBound();
+bool mouseBeganInImpulseHorizontalSelect();
+GraphData *getValuesFromGraph(int current_channel);
 
 void initializeGlobalParameters() {
 	g_block_length = MIN_FFT_BLOCK_SIZE;
@@ -256,6 +345,14 @@ void initializeGlobalParameters() {
 	g_output_storage_buffer2 = (float *) calloc(g_output_storage_buffer2_length,
 			sizeof(float));
 
+}
+
+int max(int a, int b) {
+	return a >= b ? a : b;
+}
+
+int min(int a, int b) {
+	return a >= b ? b : a;
 }
 
 void Font(void *font, char *text, int x, int y) {
@@ -290,11 +387,11 @@ int ButtonClickTest(Button* b,int x,int y)
 		/*
 		 *	If clicked within button area, then return true
 		 */
-	    if( x > b->x      &&
-			x < b->x+b->w &&
-			y > b->y      &&
-			y < b->y+b->h ) {
-				return 1;
+		if( x > b->x      &&
+				x < b->x+b->w &&
+				y > b->y      &&
+				y < b->y+b->h ) {
+			return 1;
 		}
 	}
 
@@ -319,7 +416,7 @@ void ButtonRelease(Button *b,int x,int y)
 		 *	as well as being released on the button.....
 		 */
 		if( ButtonClickTest(b,TheMouse.xpress,TheMouse.ypress) &&
-			ButtonClickTest(b,x,y) )
+				ButtonClickTest(b,x,y) )
 		{
 			/*
 			 *	Then if a callback function has been set, call it.
@@ -422,9 +519,9 @@ void SliderPassive(Slider *s, int x, int y) {
 
 
 
-//			printf("Slider selected, distance: %f, current value: %d\n", distance, currentValue);
+			//			printf("Slider selected, distance: %f, current value: %d\n", distance, currentValue);
 		} else {
-//			printf("Slider not selected\n");
+			//			printf("Slider not selected\n");
 		}
 	}
 
@@ -457,16 +554,16 @@ void ButtonPassive(Button *b,int x,int y)
 		}
 		else
 
-		/*
-		 *	If the cursor is no longer over the control, then if the control
-		 *	is highlighted (ie, the mouse has JUST moved off the control) then
-		 *	we set the highlighting back to false, and force a redraw.
-		 */
-		if( b->highlighted == 1 )
-		{
-			b->highlighted = 0;
-			glutPostRedisplay();
-		}
+			/*
+			 *	If the cursor is no longer over the control, then if the control
+			 *	is highlighted (ie, the mouse has JUST moved off the control) then
+			 *	we set the highlighting back to false, and force a redraw.
+			 */
+			if( b->highlighted == 1 )
+			{
+				b->highlighted = 0;
+				glutPostRedisplay();
+			}
 	}
 }
 
@@ -480,8 +577,8 @@ void MouseMotion(int x, int y)
 	/*
 	 *	Calculate how much the mouse actually moved
 	 */
-	int dx = x - TheMouse.x;
-	int dy = y - TheMouse.y;
+//	int dx = x - TheMouse.x;
+//	int dy = y - TheMouse.y;
 
 	/*
 	 *	update the mouse position
@@ -489,16 +586,29 @@ void MouseMotion(int x, int y)
 	TheMouse.x = x;
 	TheMouse.y = y;
 
+	if (TheMouse.x != TheMouse.xpress && mouseBeganInImpulseHorizontalSelect()) {
+		impulseHorizontalSelect->dragging = true;
+	}
+
+	if (impulseHorizontalSelect->dragging) {
+		int new_left_bound = min(TheMouse.x, TheMouse.xpress);
+		int new_right_bound = max(TheMouse.x, TheMouse.xpress);
+		impulseHorizontalSelect->left_bound = new_left_bound;
+		impulseHorizontalSelect->right_bound = new_right_bound;
+	}
 
 	/*
 	 *	Check MyButton to see if we should highlight it cos the mouse is over it
 	 */
 	ButtonPassive(&RecomputeImpulseButton,x,y);
 	ButtonPassive(&RandomizeButton,x,y);
+	ButtonPassive(&ReverseButton,x,y);
 	SliderPassive(&SmoothnessSlider,x,y);
+	SliderPassive(&DryWetSlider,x,y);
 	SliderPassive(&InterpolationSlider,x,y);
 	SliderPassive(&ChannelSlider,x,y);
 	SliderPassive(&ImpulseLengthSlider,x,y);
+	SliderPassive(&InputSensitivitySlider,x,y);
 
 	/*
 	 *	Force a redraw of the screen
@@ -535,6 +645,27 @@ void MouseButton(int button,int state,int x, int y)
 			TheMouse.ypress = y;
 		}
 
+		if (mouseCloseToTopLine()) {
+			impulseWindow->top_line_selected = true;
+		}
+		if (mouseCloseToMidLine()) {
+			impulseWindow->mid_line_selected = true;
+		}
+		if (mouseCloseToBottomLine()) {
+			impulseWindow->bottom_line_selected = true;
+		}
+
+		if (mouseIsInDrawingArea() && !mouseCloseToALine()) {
+			g_drawing = true;
+		}
+
+		if (mouseCloserToLeftBound() && !impulseHorizontalSelect->dragging) {
+			impulseHorizontalSelect->left_bound_selected = true;
+		}
+		if (mouseCloserToRightBound() && !impulseHorizontalSelect->dragging) {
+			impulseHorizontalSelect->right_bound_selected = true;
+		}
+
 		/*
 		 *	Which button was pressed?
 		 */
@@ -548,8 +679,14 @@ void MouseButton(int button,int state,int x, int y)
 			if (ButtonClickTest(&RandomizeButton,x,y)) {
 				ButtonPress(&RandomizeButton,x,y);
 			}
+			if (ButtonClickTest(&ReverseButton,x,y)) {
+				ButtonPress(&ReverseButton,x,y);
+			}
 			if (SliderClickTest(&SmoothnessSlider,x,y)) {
 				SliderPress(&SmoothnessSlider,x,y);
+			}
+			if (SliderClickTest(&DryWetSlider,x,y)) {
+				SliderPress(&DryWetSlider,x,y);
 			}
 			if (SliderClickTest(&InterpolationSlider,x,y)) {
 				SliderPress(&InterpolationSlider,x,y);
@@ -559,6 +696,9 @@ void MouseButton(int button,int state,int x, int y)
 			}
 			if (SliderClickTest(&ChannelSlider,x,y)) {
 				SliderPress(&ChannelSlider,x,y);
+			}
+			if (SliderClickTest(&InputSensitivitySlider,x,y)) {
+				SliderPress(&InputSensitivitySlider,x,y);
 			}
 			break;
 
@@ -572,6 +712,28 @@ void MouseButton(int button,int state,int x, int y)
 	}
 	else
 	{
+
+		impulseWindow->top_line_selected = false;
+		impulseWindow->mid_line_selected = false;
+		impulseWindow->bottom_line_selected = false;
+
+		impulseHorizontalSelect->left_bound_selected = false;
+		impulseHorizontalSelect->right_bound_selected = false;
+
+		if (impulseHorizontalSelect->dragging) {
+
+			int new_left_bound = min(TheMouse.x, TheMouse.xpress);
+			int new_right_bound = max(TheMouse.x, TheMouse.xpress);
+			impulseHorizontalSelect->left_bound = new_left_bound;
+			impulseHorizontalSelect->right_bound = new_right_bound;
+
+			impulseHorizontalSelect->dragging = false;
+		}
+
+
+
+		g_drawing = false;
+
 		/*
 		 *	Which button was released?
 		 */
@@ -585,8 +747,14 @@ void MouseButton(int button,int state,int x, int y)
 			if (ButtonClickTest(&RandomizeButton,x,y)) {
 				ButtonRelease(&RandomizeButton,x,y);
 			}
+			if (ButtonClickTest(&ReverseButton,x,y)) {
+				ButtonRelease(&ReverseButton,x,y);
+			}
 			if (SliderClickTest(&SmoothnessSlider,TheMouse.xpress,TheMouse.ypress)) {
 				SliderRelease(&SmoothnessSlider,x,y);
+			}
+			if (SliderClickTest(&DryWetSlider,TheMouse.xpress,TheMouse.ypress)) {
+				SliderRelease(&DryWetSlider,x,y);
 			}
 			if (SliderClickTest(&InterpolationSlider,TheMouse.xpress,TheMouse.ypress)) {
 				SliderRelease(&InterpolationSlider,x,y);
@@ -596,6 +764,9 @@ void MouseButton(int button,int state,int x, int y)
 			}
 			if (SliderClickTest(&ChannelSlider,TheMouse.xpress,TheMouse.ypress)) {
 				SliderRelease(&ChannelSlider,x,y);
+			}
+			if (SliderClickTest(&InputSensitivitySlider,TheMouse.xpress,TheMouse.ypress)) {
+				SliderRelease(&InputSensitivitySlider,x,y);
 			}
 			break;
 		case GLUT_MIDDLE_BUTTON:
@@ -607,7 +778,7 @@ void MouseButton(int button,int state,int x, int y)
 		}
 	}
 
-//	printf("Mouse: x = %d, y = %d\n", TheMouse.x, TheMouse.y);
+	//	printf("Mouse: x = %d, y = %d\n", TheMouse.x, TheMouse.y);
 
 	/*
 	 *	Force a redraw of the screen. If we later want interactions with the mouse
@@ -617,8 +788,8 @@ void MouseButton(int button,int state,int x, int y)
 }
 
 void SliderDraw(Slider *s) {
-	int fontx;
-	int fonty;
+//	int fontx;
+//	int fonty;
 
 	float inc = (float) (s->x_max - s->x_min) / 100.0f;
 
@@ -658,7 +829,7 @@ void SliderDraw(Slider *s) {
 		currentValue = s->max_val;
 	}
 
-	int x_position;
+//	int x_position;
 
 	glColor3f(0,0,0);
 	if (currentValue < 10) {
@@ -667,10 +838,13 @@ void SliderDraw(Slider *s) {
 	} else if (currentValue < 100) {
 		snprintf(buf, 20, "%d", currentValue);
 		Font(GLUT_BITMAP_HELVETICA_10, buf, s->x_pos-6, s->y+4);
-	} else {
+	} else if (strcmp(s->label, "Length") == 0) {
 		glColor3f(1,1,1);
 		snprintf(buf, 20, "%f", (float)currentValue/(float)SAMPLE_RATE);
 		Font(GLUT_BITMAP_HELVETICA_10, strcat(buf, " sec"), s->x_min + 40, s->y-15);
+	} else if (strcmp(s->label, "Input Sensitivity") == 0 || strcmp(s->label, "Dry/Wet") == 0) {
+		snprintf(buf, 20, "%d", currentValue);
+		Font(GLUT_BITMAP_HELVETICA_10, buf, s->x_pos-8, s->y+4);
 	}
 
 
@@ -687,11 +861,21 @@ void SliderDraw(Slider *s) {
 			SmoothnessSlider.callbackFunction();
 		}
 	}
+	if(strcmp(s->label,"Dry/Wet") == 0) {
+		if (DryWetSlider.callbackFunction) {
+			DryWetSlider.callbackFunction();
+		}
+	}
 	if(strcmp(s->label,"Channel") == 0) {
 		if (ChannelSlider.callbackFunction) {
 			ChannelSlider.callbackFunction();
 		}
 	}
+	if(strcmp(s->label,"Input Sensitivity") == 0) {
+	if (InputSensitivitySlider.callbackFunction) {
+		InputSensitivitySlider.callbackFunction();
+	}
+}
 }
 
 void ButtonDraw(Button *b) {
@@ -740,7 +924,7 @@ void ButtonDraw(Button *b) {
 
 	glLineWidth(1);
 
-	fontx = b->x + (b->w - glutBitmapLength(GLUT_BITMAP_HELVETICA_10, b->label)) / 2;
+	fontx = b->x + (b->w - glutBitmapLength(GLUT_BITMAP_HELVETICA_10, (const unsigned char *) b->label)) / 2;
 	fonty = b->y + (b->h + 10) / 2;
 
 	if (b->state) {
@@ -785,12 +969,35 @@ void RecomputeImpulseButtonCallback() {
 	g_changingImpulse = false;
 }
 
+void ReverseButtonCallback() {
+	GraphData *graphData = getValuesFromGraph(g_current_channel_view);
+
+	if (!graphData) {
+		return;
+	}
+
+	if (g_current_channel_view == LEFT) {
+		for (int i=0; i<graphData->length; i++) {
+			top_vals_left[graphData->first_index + i] = graphData->y_values[graphData->length - 1 - i];
+		}
+	} else if (g_current_channel_view == RIGHT) {
+		for (int i=0; i<graphData->length; i++) {
+			top_vals_right[graphData->first_index + i] = graphData->y_values[graphData->length - 1 - i];
+		}
+	}
+
+
+	free(graphData->x_indices);
+	free(graphData->y_values);
+	free(graphData);
+}
+
 void RandomizeButtonCallback() {
 	printf("Randomizing...\n");
 	for (int i=0; i<HALF_FFT_SIZE; i++) {
-//		printf("top_vals_left[%d]: %f\n", i, top_vals_left[i]);
+		//		printf("top_vals_left[%d]: %f\n", i, top_vals_left[i]);
 		float randomVal = ((rand() / (float) RAND_MAX) - 0.5)*0.05 + 1;
-//		printf("random: %f\n", randomVal);
+		//		printf("random: %f\n", randomVal);
 		if (top_vals_left[i] * randomVal < 0.0f && top_vals_left[i] * randomVal > -6.0f) {
 			top_vals_left[i] *= randomVal;
 		}
@@ -804,7 +1011,7 @@ void RandomizeButtonCallback() {
 }
 
 void SmoothnessSliderCallback() {
-//	printf("Smoothing...\n");
+	//	printf("Smoothing...\n");
 	// Find how far along the slider the mouse is
 	int range = SmoothnessSlider.x_max - SmoothnessSlider.x_min;
 	float distance = (float) (SmoothnessSlider.x_pos - SmoothnessSlider.x_min) / (float) range;
@@ -817,7 +1024,7 @@ void SmoothnessSliderCallback() {
 	}
 
 	SmoothnessSlider.current_val = currentValue;
-//	printf("The value is now %d\n", SmoothnessSlider.current_val);
+	//	printf("The value is now %d\n", SmoothnessSlider.current_val);
 	smooth_draw_amt = currentValue;
 }
 
@@ -830,37 +1037,68 @@ void ChannelSliderCallback() {
 	g_current_channel_view = ChannelSlider.current_val;
 }
 
+void DryWetSliderCallback() {
+	int range = DryWetSlider.x_max - DryWetSlider.x_min;
+	float distance = (float) (DryWetSlider.x_pos - DryWetSlider.x_min) / (float) range;
+	int currentValue = ceil(distance * (DryWetSlider.max_val - DryWetSlider.min_val));
+	if (currentValue < DryWetSlider.min_val) {
+		currentValue = DryWetSlider.min_val;
+	}
+	if (currentValue > DryWetSlider.max_val) {
+		currentValue = DryWetSlider.max_val;
+	}
+	DryWetSlider.current_val = currentValue;
+	g_dry_wet = currentValue;
+	//	printf("Dry/Wet: %d\n", g_dry_wet);
+}
+
 void InterpolationSliderCallback() {
 	int range = InterpolationSlider.x_max - InterpolationSlider.x_min;
 	float distance = (float) (InterpolationSlider.x_pos - InterpolationSlider.x_min) / (float) range;
 	int currentValue = ceil(distance * (InterpolationSlider.max_val - InterpolationSlider.min_val));
-		if (currentValue < InterpolationSlider.min_val) {
-			currentValue = InterpolationSlider.min_val;
-		}
-		if (currentValue > InterpolationSlider.max_val) {
-			currentValue = InterpolationSlider.max_val;
-		}
+	if (currentValue < InterpolationSlider.min_val) {
+		currentValue = InterpolationSlider.min_val;
+	}
+	if (currentValue > InterpolationSlider.max_val) {
+		currentValue = InterpolationSlider.max_val;
+	}
 
-		InterpolationSlider.current_val = currentValue;
-//		printf("The value is now %d\n", InterpolationSlider.current_val);
-		g_interpolation_amt = currentValue;
+	InterpolationSlider.current_val = currentValue;
+	//		printf("The value is now %d\n", InterpolationSlider.current_val);
+	g_interpolation_amt = currentValue;
+}
+
+void InputSensitivitySliderCallback() {
+	int range = InputSensitivitySlider.x_max - InputSensitivitySlider.x_min;
+	float distance = (float) (InputSensitivitySlider.x_pos - InputSensitivitySlider.x_min) / (float) range;
+	int currentValue = ceil(distance * (InputSensitivitySlider.max_val - InputSensitivitySlider.min_val));
+	if (currentValue < InputSensitivitySlider.min_val) {
+		currentValue = InputSensitivitySlider.min_val;
+	}
+	if (currentValue > InputSensitivitySlider.max_val) {
+		currentValue = InputSensitivitySlider.max_val;
+	}
+
+	InputSensitivitySlider.current_val = currentValue;
+	//		printf("The value is now %d\n", InterpolationSlider.current_val);
+	g_input_sensitivity = currentValue;
 }
 
 void ImpulseLengthSliderCallback() {
 	int range = ImpulseLengthSlider.x_max - ImpulseLengthSlider.x_min;
 	float distance = (float) (ImpulseLengthSlider.x_pos - ImpulseLengthSlider.x_min) / (float) range;
 	int currentValue = ceil(distance * (ImpulseLengthSlider.max_val - ImpulseLengthSlider.min_val));
-		if (currentValue < ImpulseLengthSlider.min_val) {
-			currentValue = ImpulseLengthSlider.min_val;
-		}
-		if (currentValue > ImpulseLengthSlider.max_val) {
-			currentValue = ImpulseLengthSlider.max_val;
-		}
+	if (currentValue < ImpulseLengthSlider.min_val) {
+		currentValue = ImpulseLengthSlider.min_val;
+	}
+	if (currentValue > ImpulseLengthSlider.max_val) {
+		currentValue = ImpulseLengthSlider.max_val;
+	}
 
-		ImpulseLengthSlider.current_val = currentValue;
-		printf("The impulse length is now %f seconds\n", (float) ImpulseLengthSlider.current_val/(float)SAMPLE_RATE);
-		g_impulse_num_frames = currentValue;
-		RecomputeImpulseButtonCallback();
+	ImpulseLengthSlider.current_val = currentValue;
+	printf("The impulse length is now %f seconds\n", (float) ImpulseLengthSlider.current_val/(float)SAMPLE_RATE);
+	g_impulse_num_frames = currentValue;
+	RecomputeImpulseButtonCallback();
 }
 
 //-----------------------------------------------------------------------------
@@ -932,7 +1170,7 @@ void keyboardFunc(unsigned char key, int x, int y) {
 			for (i=0; i<g_input_storage_buffer_length; i++) {
 				g_input_storage_buffer[i] = 0.0f;
 			}
-	//		getExponentialFitFromGraph(g_impulse->numFrames / FFT_SIZE);
+			//		getExponentialFitFromGraph(g_impulse->numFrames / FFT_SIZE);
 			reloadImpulse();
 			printf("impulse reloaded\n");
 			g_r_pressed = true;
@@ -964,7 +1202,7 @@ void keyboardFunc(unsigned char key, int x, int y) {
 
 	case 'a':
 		a_pressed = true;
-//		printf("'a' has been pressed.\n");
+		//		printf("'a' has been pressed.\n");
 		break;
 	case 'z':
 		z_pressed = true;
@@ -982,8 +1220,8 @@ void passiveMotionFunc(int x, int y) {
 	/*
 	 *	Calculate how much the mouse actually moved
 	 */
-	int dx = x - TheMouse.x;
-	int dy = y - TheMouse.y;
+//	int dx = x - TheMouse.x;
+//	int dy = y - TheMouse.y;
 
 	/*
 	 *	update the mouse position
@@ -996,7 +1234,8 @@ void passiveMotionFunc(int x, int y) {
 	 */
 	ButtonPassive(&RecomputeImpulseButton,x,y);
 	ButtonPassive(&RandomizeButton,x,y);
-//	SliderPassive(&SmoothnessSlider,x,y);
+	ButtonPassive(&ReverseButton,x,y);
+	//	SliderPassive(&SmoothnessSlider,x,y);
 
 	/*
 	 *	Note that I'm not using a glutPostRedisplay() call here. The passive motion function
@@ -1005,14 +1244,14 @@ void passiveMotionFunc(int x, int y) {
 	 *	will look at a way to solve this problem and force a redraw only when needed.
 	 */
 
-//	printf("x: %f, y: %f\n", g_mouse_x, g_mouse_y);
+	//	printf("x: %f, y: %f\n", g_mouse_x, g_mouse_y);
 }
 
 void keyboardUpFunc(unsigned char key, int x, int y) {
 	switch (key) {
 	case 'a':
 		a_pressed = false;
-//		printf("'a' has been released.\n");
+		//		printf("'a' has been released.\n");
 		break;
 	case 'r':
 		g_r_pressed = false;
@@ -1093,18 +1332,110 @@ void initialize_graphics() {
 
 	glEnable( GL_LIGHT1);
 
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+}
+
+bool mouseBeganInImpulseHorizontalSelect() {
+	return (TheMouse.ypress >= impulseHorizontalSelect->top_left.y &&
+			TheMouse.ypress <= impulseHorizontalSelect->bottom_left.y &&
+			TheMouse.xpress >= impulseHorizontalSelect->top_left.x &&
+			TheMouse.xpress <= impulseHorizontalSelect->top_right.x);
+}
+
+bool mouseInImpulseHorizontalSelect() {
+	return (TheMouse.y >= impulseHorizontalSelect->top_left.y &&
+			TheMouse.y <= impulseHorizontalSelect->bottom_left.y &&
+			TheMouse.x >= impulseHorizontalSelect->top_left.x &&
+			TheMouse.x <= impulseHorizontalSelect->top_right.x);
+}
+
+bool mouseCloserToLeftBound() {
+	if (!mouseInImpulseHorizontalSelect() || impulseHorizontalSelect->dragging) {
+		return false;
+	}
+	return (abs(TheMouse.x - impulseHorizontalSelect->left_bound) < abs(TheMouse.x - impulseHorizontalSelect->right_bound));
+}
+
+bool mouseCloserToRightBound() {
+	if (!mouseInImpulseHorizontalSelect() || impulseHorizontalSelect->dragging) {
+		return false;
+	}
+	return (abs(TheMouse.x - impulseHorizontalSelect->left_bound) >= abs(TheMouse.x - impulseHorizontalSelect->right_bound));
+}
+
+bool mouseCloseToTopLine() {
+
+	if (g_drawing) {
+		return false;
+	}
+	if (impulseWindow->top_line_selected) {
+		return true;
+	}
+	if (impulseWindow->mid_line_selected || impulseWindow->bottom_line_selected) {
+		return false;
+	}
+	if (abs(TheMouse.y - impulseWindow->top_line) < 20) {
+		return true;
+	} else {
+		return false;
+	}
+
+}
+
+bool mouseCloseToMidLine() {
+
+	if (g_drawing) {
+		return false;
+	}
+	if (impulseWindow->mid_line_selected) {
+		return true;
+	}
+	if (impulseWindow->top_line_selected || impulseWindow->bottom_line_selected) {
+		return false;
+	}
+	if (abs(TheMouse.y - impulseWindow->mid_line) < 20) {
+		return true;
+	} else {
+		return false;
+	}
+
+}
+
+bool mouseCloseToBottomLine() {
+
+	if (g_drawing) {
+		return false;
+	}
+	if (impulseWindow->bottom_line_selected) {
+		return true;
+	}
+	if (impulseWindow->mid_line_selected || impulseWindow->top_line_selected) {
+		return false;
+	}
+	if (abs(TheMouse.y - impulseWindow->bottom_line) < 20) {
+		return true;
+	} else {
+		return false;
+	}
+
+}
+
+bool mouseCloseToALine() {
+	return (mouseCloseToBottomLine() || mouseCloseToMidLine() || mouseCloseToTopLine());
 }
 
 bool mouseBeganInDrawingArea() {
-	return (TheMouse.ypress > g_top_of_display && TheMouse.ypress < g_bottom_of_display && TheMouse.xpress > g_left_of_display && TheMouse.xpress < g_right_of_display);
+	return (TheMouse.ypress > impulseWindow->margin_top - impulseWindow->edge_margin && TheMouse.ypress < impulseWindow->margin_bottom + impulseWindow->edge_margin && TheMouse.xpress > impulseWindow->margin_left && TheMouse.xpress < impulseWindow->margin_right);
 }
 
 bool mouseIsInDrawingArea() {
-	return (TheMouse.y > g_top_of_display && TheMouse.y < g_bottom_of_display && TheMouse.x > g_left_of_display && TheMouse.x < g_right_of_display);
+	return (TheMouse.y > impulseWindow->margin_top - impulseWindow->edge_margin && TheMouse.y < impulseWindow->margin_bottom + impulseWindow->edge_margin && TheMouse.x > impulseWindow->margin_left && TheMouse.x < impulseWindow->margin_right);
 }
 
 bool noElementsAreSelected() {
-	if (ChannelSlider.state == 1 || SmoothnessSlider.state == 1 || InterpolationSlider.state == 1 || ImpulseLengthSlider.state == 1 || RecomputeImpulseButton.state == 1 || RandomizeButton.state == 1) {
+	if (impulseWindow->bottom_line_selected || impulseWindow->mid_line_selected || impulseWindow->top_line_selected || InputSensitivitySlider.state == 1 || DryWetSlider.state == 1 || ChannelSlider.state == 1 || SmoothnessSlider.state == 1 || InterpolationSlider.state == 1 || ImpulseLengthSlider.state == 1 || RecomputeImpulseButton.state == 1 || RandomizeButton.state == 1 || ReverseButton.state == 1) {
 		return false;
 	}
 	return true;
@@ -1113,15 +1444,15 @@ bool noElementsAreSelected() {
 void displayFunc() {
 	int i, j;
 
-	float x_location;
+//	float x_location;
 
-//	while (!g_ready) {
-//		usleep(1000);
-//	}
-//	g_ready = false;
+	//	while (!g_ready) {
+	//		usleep(1000);
+	//	}
+	//	g_ready = false;
 
-//	glMatrixMode(GL_MODELVIEW);
-//	glLoadIdentity();
+	//	glMatrixMode(GL_MODELVIEW);
+	//	glLoadIdentity();
 
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -1134,12 +1465,12 @@ void displayFunc() {
 
 	// draw view here
 	// If the mouse is in the drawing area
-	if (mouseIsInDrawingArea() && noElementsAreSelected()) {
+	if (mouseBeganInDrawingArea() && noElementsAreSelected()) {
 
 		int index = 0;
 
 		for (int i=0; i<HALF_FFT_SIZE; i++) {
-			if ((TheMouse.x - g_left_of_display) > x_values[i]) {
+			if ((TheMouse.x - impulseWindow->margin_left) > x_values[i]) {
 				index = i;
 				g_current_index = i;
 			}
@@ -1149,7 +1480,7 @@ void displayFunc() {
 			// If draw button is pressed
 			if (TheMouse.lmb == 1) {
 
-	//			printf("index: %d\n", index);
+				//			printf("index: %d\n", index);
 
 				if (index < 0) {
 					index = 0;
@@ -1159,9 +1490,15 @@ void displayFunc() {
 				}
 
 				// Set the value of the top_vals array using the y-value of the mouse position
-	//			printf("Mouse: %d, %d\n", TheMouse.x, TheMouse.y);
-				float newVal = 6 * ((float) g_top_of_display - (float) TheMouse.y) / ((float) g_bottom_of_display - (float) g_top_of_display);
-	//			printf("NewVal: %f\n", newVal);
+				//			printf("Mouse: %d, %d\n", TheMouse.x, TheMouse.y);
+				float newVal = 6 * ((float) impulseWindow->margin_top - (float) TheMouse.y) / ((float) impulseWindow->margin_bottom - (float) impulseWindow->margin_top);
+				//				printf("NewVal: %f\n", newVal);
+				if (newVal > 0.0f) {
+					newVal = 0.0f;
+				}
+				if (newVal < -5.99f) {
+					newVal = -5.99f;
+				}
 				top_vals_left[index] = newVal;
 
 				// If smooth draw is activated
@@ -1184,11 +1521,33 @@ void displayFunc() {
 					}
 					// If the mouse is near the left of the drawing area
 					if (index - smooth_draw_amt < 0) {
-
+						int index_to_the_left = 0;
+						int index_to_the_right = index + smooth_draw_amt;
+						float val_to_the_left = top_vals_left[index_to_the_left];
+						float val_to_the_right = top_vals_left[index_to_the_right];
+						float inc_to_the_left = (newVal - val_to_the_left)/(float) (index - index_to_the_left);
+						float inc_to_the_right = (newVal - val_to_the_right)/(float) smooth_draw_amt;
+						for (int i=1; i < (index - index_to_the_left); i++) {
+							top_vals_left[index - i] = newVal - i*inc_to_the_left;
+						}
+						for (int i=1; i < smooth_draw_amt; i++) {
+							top_vals_left[index + i] = newVal - i*inc_to_the_right;
+						}
 					}
 					// If the mouse is near the right of the drawing area
 					if (index + smooth_draw_amt >= HALF_FFT_SIZE) {
-
+						int index_to_the_left = index - smooth_draw_amt;
+						int index_to_the_right = HALF_FFT_SIZE - 1;
+						float val_to_the_left = top_vals_left[index_to_the_left];
+						float val_to_the_right = top_vals_left[index_to_the_right];
+						float inc_to_the_left = (newVal - val_to_the_left)/(float) smooth_draw_amt;
+						float inc_to_the_right = (newVal - val_to_the_right)/(float) (index_to_the_right - index);
+						for (int i=1; i < smooth_draw_amt ; i++) {
+							top_vals_left[index - i] = newVal - i*inc_to_the_left;
+						}
+						for (int i=1; i < (index_to_the_right - index); i++) {
+							top_vals_left[index + i] = newVal - i*inc_to_the_right;
+						}
 					}
 				}
 
@@ -1197,7 +1556,7 @@ void displayFunc() {
 			// If draw button is pressed
 			if (TheMouse.lmb == 1) {
 
-	//			printf("index: %d\n", index);
+				//			printf("index: %d\n", index);
 
 				if (index < 0) {
 					index = 0;
@@ -1207,9 +1566,15 @@ void displayFunc() {
 				}
 
 				// Set the value of the top_vals array using the y-value of the mouse position
-	//			printf("Mouse: %d, %d\n", TheMouse.x, TheMouse.y);
-				float newVal = 6 * ((float) g_top_of_display - (float) TheMouse.y) / ((float) g_bottom_of_display - (float) g_top_of_display);
-	//			printf("NewVal: %f\n", newVal);
+				//			printf("Mouse: %d, %d\n", TheMouse.x, TheMouse.y);
+				float newVal = 6 * ((float) impulseWindow->margin_top - (float) TheMouse.y) / ((float) impulseWindow->margin_bottom - (float) impulseWindow->margin_top);
+				//			printf("NewVal: %f\n", newVal);
+				if (newVal > 0.0f) {
+					newVal = 0.0f;
+				}
+				if (newVal < -5.99f) {
+					newVal = -5.99f;
+				}
 				top_vals_right[index] = newVal;
 
 				// If smooth draw is activated
@@ -1232,18 +1597,37 @@ void displayFunc() {
 					}
 					// If the mouse is near the left of the drawing area
 					if (index - smooth_draw_amt < 0) {
-
+						int index_to_the_left = 0;
+						int index_to_the_right = index + smooth_draw_amt;
+						float val_to_the_left = top_vals_right[index_to_the_left];
+						float val_to_the_right = top_vals_right[index_to_the_right];
+						float inc_to_the_left = (newVal - val_to_the_left)/(float) (index - index_to_the_left);
+						float inc_to_the_right = (newVal - val_to_the_right)/(float) smooth_draw_amt;
+						for (int i=1; i < (index - index_to_the_left) ; i++) {
+							top_vals_right[index - i] = newVal - i*inc_to_the_left;
+						}
+						for (int i=1; i < smooth_draw_amt; i++) {
+							top_vals_right[index + i] = newVal - i*inc_to_the_right;
+						}
 					}
 					// If the mouse is near the right of the drawing area
 					if (index + smooth_draw_amt >= HALF_FFT_SIZE) {
-
+						int index_to_the_left = index - smooth_draw_amt;
+						int index_to_the_right = HALF_FFT_SIZE - 1;
+						float val_to_the_left = top_vals_right[index_to_the_left];
+						float val_to_the_right = top_vals_right[index_to_the_right];
+						float inc_to_the_left = (newVal - val_to_the_left)/(float) smooth_draw_amt;
+						float inc_to_the_right = (newVal - val_to_the_right)/(float) (index_to_the_right - index);
+						for (int i=1; i < smooth_draw_amt ; i++) {
+							top_vals_right[index - i] = newVal - i*inc_to_the_left;
+						}
+						for (int i=1; i < (index_to_the_right - index); i++) {
+							top_vals_right[index + i] = newVal - i*inc_to_the_right;
+						}
 					}
 				}
-
 			}
 		}
-
-
 	}
 
 	glDisable(GL_DEPTH_TEST);
@@ -1256,51 +1640,217 @@ void displayFunc() {
 
 	ButtonDraw(&RecomputeImpulseButton);
 	ButtonDraw(&RandomizeButton);
+	ButtonDraw(&ReverseButton);
 	SliderDraw(&SmoothnessSlider);
+	SliderDraw(&DryWetSlider);
 	SliderDraw(&InterpolationSlider);
 	SliderDraw(&ChannelSlider);
 	SliderDraw(&ImpulseLengthSlider);
-
-	float margin = 20;
+	SliderDraw(&InputSensitivitySlider);
 
 	glBegin(GL_QUADS);
 	glColor3f(0.1f,0.1f,0.2f);
-	glVertex3f(g_left_of_display - margin, g_top_of_display - margin, 0.0f);
-	glVertex3f(g_left_of_display - margin, g_bottom_of_display + margin, 0.0f);
-	glVertex3f(g_right_of_display + margin, g_bottom_of_display + margin, 0.0f);
-	glVertex3f(g_right_of_display + margin, g_top_of_display - margin, 0.0f);
+	glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->margin_top - impulseWindow->edge_margin, 0.0f);
+	glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->margin_bottom + impulseWindow->edge_margin, 0.0f);
+	glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->margin_bottom + impulseWindow->edge_margin, 0.0f);
+	glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->margin_top - impulseWindow->edge_margin, 0.0f);
+	glEnd();
+
+	float line_opacity_when_not_selected = 0.2f;
+
+	if (impulseWindow->top_line_selected || mouseCloseToTopLine()) {
+		glLineWidth(3);
+		glColor4f(0.5f, 0.2f, 0.7f, 1.0f);
+	} else {
+		glLineWidth(1);
+		glColor4f(0.5f, 0.2f, 0.7f, line_opacity_when_not_selected);
+	}
+
+	if (impulseWindow->top_line_selected) {
+		impulseWindow->top_line = TheMouse.y;
+		if (impulseWindow->top_line < impulseWindow->margin_top) {
+			impulseWindow->top_line = impulseWindow->margin_top;
+		}
+		if (impulseWindow->top_line > impulseWindow->mid_line - 20) {
+			impulseWindow->top_line = impulseWindow->mid_line - 20;
+		}
+	}
+
+	// Draw top line
+	glBegin(GL_LINE_STRIP);
+	glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->top_line, 0.0f);
+	glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->top_line, 0.0f);
+	glEnd();
+
+	if (impulseWindow->mid_line_selected || mouseCloseToMidLine()) {
+		glLineWidth(3);
+		glColor4f(0.5f, 0.4f, 0.5f, 1.0f);
+	} else {
+		glLineWidth(1);
+		glColor4f(0.5f, 0.4f, 0.5f, line_opacity_when_not_selected);
+	}
+
+	if (impulseWindow->mid_line_selected) {
+		impulseWindow->mid_line = TheMouse.y;
+		if (impulseWindow->mid_line < impulseWindow->top_line + 20) {
+			impulseWindow->mid_line = impulseWindow->top_line + 20;
+		}
+		if (impulseWindow->mid_line > impulseWindow->bottom_line - 20) {
+			impulseWindow->mid_line = impulseWindow->bottom_line - 20;
+		}
+	}
+
+	// Draw mid line
+	glBegin(GL_LINE_STRIP);
+	glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->mid_line, 0.0f);
+	glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->mid_line, 0.0f);
+	glEnd();
+
+	if (impulseWindow->bottom_line_selected || mouseCloseToBottomLine()) {
+		glLineWidth(3);
+		glColor4f(0.5f, 0.6f, 0.3f, 1.0f);
+	} else {
+		glLineWidth(1);
+		glColor4f(0.5f, 0.6f, 0.3f, line_opacity_when_not_selected);
+	}
+
+	if (impulseWindow->bottom_line_selected) {
+		impulseWindow->bottom_line = TheMouse.y;
+		if (impulseWindow->bottom_line < impulseWindow->mid_line + 20) {
+			impulseWindow->bottom_line = impulseWindow->mid_line + 20;
+		}
+		if (impulseWindow->bottom_line > impulseWindow->margin_bottom) {
+			impulseWindow->bottom_line = impulseWindow->margin_bottom;
+		}
+	}
+
+	// Draw bottom line
+	glBegin(GL_LINE_STRIP);
+	glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->bottom_line, 0.0f);
+	glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->bottom_line, 0.0f);
 	glEnd();
 
 	glLineWidth(3);
+
+	// Draw horizontal select
+	glBegin(GL_QUADS);
+	glColor3f(0.2f, 0.35f, 0.5f);
+	glVertex3f(impulseHorizontalSelect->top_left.x, impulseHorizontalSelect->top_left.y, 0.0f);
+	glVertex3f(impulseHorizontalSelect->top_right.x, impulseHorizontalSelect->top_right.y, 0.0f);
+	glVertex3f(impulseHorizontalSelect->bottom_right.x, impulseHorizontalSelect->bottom_right.y, 0.0f);
+	glVertex3f(impulseHorizontalSelect->bottom_left.x, impulseHorizontalSelect->bottom_left.y, 0.0f);
+	glEnd();
+
+	// Draw left bound
+	if (mouseCloserToLeftBound()) {
+		glLineWidth(3);
+	} else {
+		glLineWidth(1);
+	}
+
+	if (impulseHorizontalSelect->left_bound_selected && !impulseHorizontalSelect->dragging) {
+		impulseHorizontalSelect->left_bound = TheMouse.x;
+	}
+	if (impulseHorizontalSelect->left_bound < impulseHorizontalSelect->top_left.x) {
+		impulseHorizontalSelect->left_bound = impulseHorizontalSelect->top_left.x;
+	}
+	if (impulseHorizontalSelect->left_bound > impulseHorizontalSelect->right_bound - 1) {
+		impulseHorizontalSelect->left_bound = impulseHorizontalSelect->right_bound - 1;
+	}
+
+	glBegin(GL_LINE_STRIP);
+	glColor3f(1,1,1);
+	glVertex3f(impulseHorizontalSelect->left_bound, impulseHorizontalSelect->top_left.y, 0.0f);
+	glVertex3f(impulseHorizontalSelect->left_bound, impulseHorizontalSelect->bottom_left.y, 0.0f);
+	glEnd();
+
+	// Draw right bound
+	if (mouseCloserToRightBound()) {
+		glLineWidth(3);
+	} else {
+		glLineWidth(1);
+	}
+
+	if (impulseHorizontalSelect->right_bound_selected && !impulseHorizontalSelect->dragging) {
+		impulseHorizontalSelect->right_bound = TheMouse.x;
+	}
+	if (impulseHorizontalSelect->right_bound > impulseHorizontalSelect->top_right.x) {
+		impulseHorizontalSelect->right_bound = impulseHorizontalSelect->top_right.x;
+	}
+
+	if (impulseHorizontalSelect->right_bound < impulseHorizontalSelect->left_bound + 1) {
+		impulseHorizontalSelect->right_bound = impulseHorizontalSelect->left_bound + 1;
+	}
+
+	glBegin(GL_LINE_STRIP);
+	glColor3f(1,1,1);
+	glVertex3f(impulseHorizontalSelect->right_bound, impulseHorizontalSelect->top_left.y, 0.0f);
+	glVertex3f(impulseHorizontalSelect->right_bound, impulseHorizontalSelect->bottom_left.y, 0.0f);
+	glEnd();
+
+	// Draw dragged area, if applicable
+	if (impulseHorizontalSelect->dragging) {
+		glLineWidth(5);
+		glBegin(GL_LINE_STRIP);
+		glColor3f(0,0,0);
+		glVertex3f(TheMouse.x, (impulseHorizontalSelect->bottom_left.y - impulseHorizontalSelect->top_left.y)/2 + impulseHorizontalSelect->top_left.y, 0.0f);
+		glVertex3f(TheMouse.xpress, (impulseHorizontalSelect->bottom_left.y - impulseHorizontalSelect->top_left.y)/2 + impulseHorizontalSelect->top_left.y, 0.0f);
+		glEnd();
+	}
+
+	float opacity = 0.02;
+
+	if (mouseInImpulseHorizontalSelect() || impulseHorizontalSelect->dragging || mouseCloseToTopLine() || mouseCloseToBottomLine()) {
+		opacity = 0.15;
+	}
+
+	// Draw selected area
+	glBegin(GL_QUADS);
+	glColor4f(1,1,1,opacity);
+	glVertex3f(impulseHorizontalSelect->left_bound, impulseWindow->top_line, 0.0f);
+	glVertex3f(impulseHorizontalSelect->right_bound, impulseWindow->top_line, 0.0f);
+	glVertex3f(impulseHorizontalSelect->right_bound, impulseWindow->bottom_line, 0.0f);
+	glVertex3f(impulseHorizontalSelect->left_bound, impulseWindow->bottom_line, 0.0f);
+	glEnd();
+	glLineWidth(3);
+
+
+	//TODO: manipulate values that are in the selected range
+//	for (int i=0; i<HALF_FFT_SIZE; i++) {
+//		if (impulseWindow->margin_left + x_values[i] > impulseHorizontalSelect->left_bound && impulseWindow->margin_left + x_values[i] < impulseHorizontalSelect->right_bound) {
+//			printf("x_values[%d] is in range\n", i);
+//		}
+//	}
+
 	// Draw y axis
 	glPushMatrix();
 	{
 		glBegin(GL_LINE_STRIP);
 		glColor3f(0.2f, 0.35f, 0.5f);
-		glVertex3f(g_left_of_display - margin, g_top_of_display - margin, 0.0f);
-		glVertex3f(g_left_of_display - margin, g_bottom_of_display + margin, 0.0f);
+		glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->margin_top - impulseWindow->edge_margin, 0.0f);
+		glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->margin_bottom + impulseWindow->edge_margin, 0.0f);
 		glEnd();
 		glBegin(GL_LINE_STRIP);
-		glVertex3f(g_right_of_display + margin, g_top_of_display - margin, 0.0f);
-		glVertex3f(g_right_of_display + margin, g_bottom_of_display + margin, 0.0f);
+		glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->margin_top - impulseWindow->edge_margin, 0.0f);
+		glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->margin_bottom + impulseWindow->edge_margin, 0.0f);
 		glEnd();
 	}
 	glPopMatrix();
 
 	float divisor = HALF_FFT_SIZE;
 
-	float x_inc = (float) (g_right_of_display - g_left_of_display) / divisor;
+	float index_x_inc = (float) (impulseWindow->margin_right - impulseWindow->margin_left) / divisor;
 
 	// Draw x axis
 	glPushMatrix();
 	{
 		glBegin(GL_LINE_STRIP);
-		glVertex3f(g_left_of_display - margin, g_bottom_of_display + margin, 0.0f);
-		glVertex3f(g_right_of_display + margin, g_bottom_of_display + margin , 0.0f);
+		glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->margin_bottom + impulseWindow->edge_margin, 0.0f);
+		glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->margin_bottom + impulseWindow->edge_margin , 0.0f);
 		glEnd();
 		glBegin(GL_LINE_STRIP);
-		glVertex3f(g_left_of_display - margin, g_top_of_display - margin, 0.0f);
-		glVertex3f(g_right_of_display + margin, g_top_of_display - margin , 0.0f);
+		glVertex3f(impulseWindow->margin_left - impulseWindow->edge_margin, impulseWindow->margin_top - impulseWindow->edge_margin, 0.0f);
+		glVertex3f(impulseWindow->margin_right + impulseWindow->edge_margin, impulseWindow->margin_top - impulseWindow->edge_margin , 0.0f);
 		glEnd();
 	}
 	glPopMatrix();
@@ -1313,11 +1863,11 @@ void displayFunc() {
 		{
 			for (i = 0; i < HALF_FFT_SIZE; i++) {
 
-				float top_value = g_top_of_display - top_vals_left[i]*((float) g_bottom_of_display - g_top_of_display)/6;
-				float inc = ((float)g_bottom_of_display - top_value) / 100;
+				float top_value = impulseWindow->margin_top - top_vals_left[i]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
+				float inc = ((float)impulseWindow->margin_bottom - top_value) / 100;
 
 				if (i > 0) {
-					float top_val_to_the_left = g_top_of_display - top_vals_left[i-1]*((float) g_bottom_of_display - g_top_of_display)/6;
+					float top_val_to_the_left = impulseWindow->margin_top - top_vals_left[i-1]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
 
 					float y_inc = (top_value - top_val_to_the_left) / g_interpolation_amt;
 					float x_inc = (x_values[i] - x_values[i-1])/g_interpolation_amt;
@@ -1327,23 +1877,23 @@ void displayFunc() {
 						for (int l=0; l<100; l++) {
 							if (abs(g_current_index - i) < smooth_draw_amt) {
 								glColor3f((float) (100 - l) * 0.8 / 100, (float) (100 - l) * 0.3 / 100,
-															(float) (100 - l) * 0.3 / 100);
+										(float) (100 - l) * 0.3 / 100);
 							} else {
 								glColor3f((float) (100 - l) * 0.6 / 100, (float) (100 - l) * 0.5 / 100,
-															(float) (100 - l) * 0.5 / 100);
+										(float) (100 - l) * 0.5 / 100);
 							}
 							float height = top_val_to_the_left + k*y_inc;
-							float height_inc = ((float) g_bottom_of_display - height) / 100;
-							glVertex3f(g_left_of_display + x_values[i-1] + x_inc*k, height + height_inc*l, 0.0f);
+							float height_inc = ((float) impulseWindow->margin_bottom - height) / 100;
+							glVertex3f(impulseWindow->margin_left + x_values[i-1] + x_inc*k, height + height_inc*l, 0.0f);
 						}
 						glEnd();
 					}
 
 				}
 
-				if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected()) {
+				if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected() && !mouseCloseToALine()) {
 					glLineWidth(6);
-				} else if (abs(g_current_index - i) < smooth_draw_amt) {
+				} else if (abs(g_current_index - i) < smooth_draw_amt && !mouseCloseToALine() && mouseIsInDrawingArea()) {
 					glLineWidth(3);
 				} else {
 					glLineWidth(1);
@@ -1351,19 +1901,19 @@ void displayFunc() {
 
 				glBegin(GL_LINE_STRIP);
 				for (j = 0; j < 100; j++) {
-					if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected()) {
+					if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected() && !mouseCloseToALine()) {
 						glColor3f((float) (100 - j) * 1.0 / 100, (float) (100 - j) * 0.1 / 100,
-																	(float) (100 - j) * 0.1 / 100);
-					} else if (abs(g_current_index - i) < smooth_draw_amt) {
+								(float) (100 - j) * 0.1 / 100);
+					} else if (abs(g_current_index - i) < smooth_draw_amt && !mouseCloseToALine() && mouseIsInDrawingArea()) {
 						glColor3f((float) (100 - j) * 0.8 / 100, (float) (100 - j) * 0.3 / 100,
-																						(float) (100 - j) * 0.3 / 100);
+								(float) (100 - j) * 0.3 / 100);
 					} else {
 						glColor3f((float) (100 - j) * 0.6 / 100, (float) (100 - j) * 0.5 / 100,
-																	(float) (100 - j) * 0.5 / 100);
+								(float) (100 - j) * 0.5 / 100);
 					}
-					float x_value = x_inc*log(i+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE);
+					float x_value = index_x_inc*log(i+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE);
 					x_values[i] = x_value;
-					glVertex3f(g_left_of_display + x_value, top_value + (float) j * inc, 0.0f);
+					glVertex3f(impulseWindow->margin_left + x_value, top_value + (float) j * inc, 0.0f);
 
 				}
 				glEnd();
@@ -1377,11 +1927,11 @@ void displayFunc() {
 		{
 			for (i = 0; i < HALF_FFT_SIZE; i++) {
 
-				float top_value = g_top_of_display - top_vals_right[i]*((float) g_bottom_of_display - g_top_of_display)/6;
-				float inc = ((float)g_bottom_of_display - top_value) / 100;
+				float top_value = impulseWindow->margin_top - top_vals_right[i]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
+				float inc = ((float)impulseWindow->margin_bottom - top_value) / 100;
 
 				if (i > 0) {
-					float top_val_to_the_left = g_top_of_display - top_vals_right[i-1]*((float) g_bottom_of_display - g_top_of_display)/6;
+					float top_val_to_the_left = impulseWindow->margin_top - top_vals_right[i-1]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
 
 					float y_inc = (top_value - top_val_to_the_left) / g_interpolation_amt;
 					float x_inc = (x_values[i] - x_values[i-1])/g_interpolation_amt;
@@ -1391,23 +1941,23 @@ void displayFunc() {
 						for (int l=0; l<100; l++) {
 							if (abs(g_current_index - i) < smooth_draw_amt) {
 								glColor3f((float) (100 - l) * 0.8 / 100, (float) (100 - l) * 0.3 / 100,
-															(float) (100 - l) * 0.3 / 100);
+										(float) (100 - l) * 0.3 / 100);
 							} else {
 								glColor3f((float) (100 - l) * 0.6 / 100, (float) (100 - l) * 0.5 / 100,
-															(float) (100 - l) * 0.5 / 100);
+										(float) (100 - l) * 0.5 / 100);
 							}
 							float height = top_val_to_the_left + k*y_inc;
-							float height_inc = ((float) g_bottom_of_display - height) / 100;
-							glVertex3f(g_left_of_display + x_values[i-1] + x_inc*k, height + height_inc*l, 0.0f);
+							float height_inc = ((float) impulseWindow->margin_bottom - height) / 100;
+							glVertex3f(impulseWindow->margin_left + x_values[i-1] + x_inc*k, height + height_inc*l, 0.0f);
 						}
 						glEnd();
 					}
 
 				}
 
-				if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected()) {
+				if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected() && !mouseCloseToALine()) {
 					glLineWidth(6);
-				} else if (abs(g_current_index - i) < smooth_draw_amt) {
+				} else if (abs(g_current_index - i) < smooth_draw_amt && !mouseCloseToALine() && mouseIsInDrawingArea()) {
 					glLineWidth(3);
 				} else {
 					glLineWidth(1);
@@ -1415,19 +1965,19 @@ void displayFunc() {
 
 				glBegin(GL_LINE_STRIP);
 				for (j = 0; j < 100; j++) {
-					if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected()) {
+					if (g_current_index == i && mouseIsInDrawingArea() && noElementsAreSelected() && !mouseCloseToALine()) {
 						glColor3f((float) (100 - j) * 1.0 / 100, (float) (100 - j) * 0.1 / 100,
-																	(float) (100 - j) * 0.1 / 100);
-					} else if (abs(g_current_index - i) < smooth_draw_amt) {
+								(float) (100 - j) * 0.1 / 100);
+					} else if (abs(g_current_index - i) < smooth_draw_amt && !mouseCloseToALine() && mouseIsInDrawingArea()) {
 						glColor3f((float) (100 - j) * 0.8 / 100, (float) (100 - j) * 0.3 / 100,
-																						(float) (100 - j) * 0.3 / 100);
+								(float) (100 - j) * 0.3 / 100);
 					} else {
 						glColor3f((float) (100 - j) * 0.6 / 100, (float) (100 - j) * 0.5 / 100,
-																	(float) (100 - j) * 0.5 / 100);
+								(float) (100 - j) * 0.5 / 100);
 					}
-					float x_value = x_inc*log(i+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE);
+					float x_value = index_x_inc*log(i+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE);
 					x_values[i] = x_value;
-					glVertex3f(g_left_of_display + x_value, top_value + (float) j * inc, 0.0f);
+					glVertex3f(impulseWindow->margin_left + x_value, top_value + (float) j * inc, 0.0f);
 
 				}
 				glEnd();
@@ -1437,6 +1987,84 @@ void displayFunc() {
 		glPopMatrix();
 	}
 
+	// Draw expected changes
+	// If mouse is in middle of window
+	if (mouseIsInDrawingArea() && noElementsAreSelected() && !mouseCloseToALine()) {
+		int index_left = 0;
+		int index_right = HALF_FFT_SIZE - 1;
+		if (g_current_index - smooth_draw_amt < 0) {
+			index_left = 0;
+		} else {
+			index_left = g_current_index - smooth_draw_amt + 1;
+		}
+		if (g_current_index + smooth_draw_amt >= HALF_FFT_SIZE) {
+			index_right = HALF_FFT_SIZE - 1;
+		} else {
+			index_right = g_current_index + smooth_draw_amt - 1;
+		}
+		int x_value_left = impulseWindow->margin_left + index_x_inc*log(index_left+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE);
+		int x_value_current = impulseWindow->margin_left + index_x_inc*log(g_current_index+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE);
+		int x_value_right = impulseWindow->margin_left + index_x_inc*log(index_right+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE);
+		float y_value_left = 0.0f;
+		float y_value_right = 0.0f;
+		if (g_current_channel_view == RIGHT) {
+			y_value_left = impulseWindow->margin_top - top_vals_right[index_left]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
+			y_value_right = impulseWindow->margin_top - top_vals_right[index_right]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
+		} else if (g_current_channel_view == LEFT) {
+			y_value_left = impulseWindow->margin_top - top_vals_left[index_left]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
+			y_value_right = impulseWindow->margin_top - top_vals_left[index_right]*((float) impulseWindow->margin_bottom - impulseWindow->margin_top)/6;
+		}
+
+		float y_value_current = TheMouse.y;
+		glBegin(GL_LINE_STRIP);
+		glColor4f(0.8f,0.3f,0.3f,0.75);
+		glVertex3f(x_value_left, y_value_left, 0.0f);
+		glVertex3f(x_value_current, y_value_current, 0.0f);
+		glVertex3f(x_value_right, y_value_right, 0.0f);
+		glEnd();
+	}
+
+	// Draw input frequency spectrum
+	glBegin(GL_LINE_STRIP);
+	glColor4f(1,1,1,0.3);
+	bool sensitivity_too_high = false;
+	for (i=0; i<HALF_FFT_SIZE; i++) {
+		//		for (j=0; j<14; j++) {
+		//			last_input_spectrum[j+1][i] = last_input_spectrum[j][i];
+		//		}
+		last_input_spectrum[14][i] = last_input_spectrum[13][i];
+		last_input_spectrum[13][i] = last_input_spectrum[12][i];
+		last_input_spectrum[12][i] = last_input_spectrum[11][i];
+		last_input_spectrum[11][i] = last_input_spectrum[10][i];
+		last_input_spectrum[10][i] = last_input_spectrum[9][i];
+		last_input_spectrum[9][i] = last_input_spectrum[8][i];
+		last_input_spectrum[8][i] = last_input_spectrum[7][i];
+		last_input_spectrum[7][i] = last_input_spectrum[6][i];
+		last_input_spectrum[6][i] = last_input_spectrum[5][i];
+		last_input_spectrum[5][i] = last_input_spectrum[4][i];
+		last_input_spectrum[4][i] = last_input_spectrum[3][i];
+		last_input_spectrum[3][i] = last_input_spectrum[2][i];
+		last_input_spectrum[2][i] = last_input_spectrum[1][i];
+		last_input_spectrum[1][i] = last_input_spectrum[0][i];
+		float inputVal = sqrt(pow(input_spectrum[i].Im, 2) + pow(input_spectrum[i].Re, 2));
+		last_input_spectrum[0][i] = inputVal;
+		float prev_sum = 0.0f;
+		for (j=0; j<16; j++) {
+			prev_sum += last_input_spectrum[j][i];
+		}
+		float displayVal = (prev_sum + inputVal)/16;
+		if (displayVal < 0.0f) {
+			displayVal = 0.0f;
+		}
+		if (displayVal*(float) g_input_sensitivity > impulseWindow->margin_bottom - impulseWindow->margin_top) {
+			sensitivity_too_high = true;
+			if (InputSensitivitySlider.x_pos > InputSensitivitySlider.x_min + 1) {
+				InputSensitivitySlider.x_pos--;
+			}
+		}
+		glVertex3f(impulseWindow->margin_left + index_x_inc*log(i+1)*(float)HALF_FFT_SIZE/log((float)HALF_FFT_SIZE), impulseWindow->margin_bottom - displayVal*(float) g_input_sensitivity, 0.0f);
+	}
+	glEnd();
 
 	// Title label
 	glColor3f(1,1,1);
@@ -1451,29 +2079,31 @@ void displayFunc() {
 	if (mouseIsInDrawingArea() && noElementsAreSelected()) {
 		// Identify the index of top_vals array corresponding with the x-value of the mouse position
 
-		float mouse_x_offset = (TheMouse.x - g_left_of_display) / (float) (g_right_of_display - g_left_of_display);
+//		float mouse_x_offset = (TheMouse.x - impulseWindow->margin_left) / (float) (impulseWindow->margin_right - impulseWindow->margin_left);
 
 		float width = (float) SAMPLE_RATE / (float) FFT_SIZE;
 
 		int index = 0;
 
 		for (int i=0; i<HALF_FFT_SIZE; i++) {
-			if ((TheMouse.x - g_left_of_display) > x_values[i]) {
+			if ((TheMouse.x - impulseWindow->margin_left) > x_values[i]) {
 				index = i;
 				g_current_index = i;
 			}
 		}
 
-		float frequency = width*index;
+		float frequency = width*(index+1); // index + 1 because bin 0 (DC) is not displayed
 
-//		printf("Index: %d\n", index);
-		char buf[20];
-		if (frequency < 1000) {
-			snprintf(buf, 20, "%f", frequency);
-			Font(GLUT_BITMAP_HELVETICA_12, strcat(buf, " Hz"), TheMouse.x, TheMouse.y);
-		} else {
-			snprintf(buf, 20, "%f", frequency/1000);
-			Font(GLUT_BITMAP_HELVETICA_12, strcat(buf, " kHz"), TheMouse.x, TheMouse.y);
+		//		printf("Index: %d\n", index);
+		if (!mouseCloseToALine()) {
+			char buf[20];
+			if (frequency < 1000) {
+				snprintf(buf, 20, "%f", frequency);
+				Font(GLUT_BITMAP_HELVETICA_12, strcat(buf, " Hz"), TheMouse.x, TheMouse.y);
+			} else {
+				snprintf(buf, 20, "%f", frequency/1000);
+				Font(GLUT_BITMAP_HELVETICA_12, strcat(buf, " kHz"), TheMouse.x, TheMouse.y);
+			}
 		}
 	}
 
@@ -1491,7 +2121,7 @@ void *calculateFFT(void *incomingFFTArgs) {
 
 	pthread_detach(pthread_self());
 
-	int state = g_changes_made;
+//	int state = g_changes_made;
 
 	FFTArgs *fftArgs = (FFTArgs *) incomingFFTArgs;
 
@@ -1500,13 +2130,13 @@ void *calculateFFT(void *incomingFFTArgs) {
 	int numCyclesToWait = fftArgs->num_callbacks_to_complete - 1;
 
 	int counter_target = (fftArgs->counter + numCyclesToWait)
-			% (g_max_factor * 2);
+					% (g_max_factor * 2);
 	if (counter_target == 0) {
 		counter_target = g_max_factor * 2;
 	}
 
-//	 1. Create buffer with length = 2 * (last_sample_index - first_sample_index),
-//	    fill the buffer with 0s.
+	//	 1. Create buffer with length = 2 * (last_sample_index - first_sample_index),
+	//	    fill the buffer with 0s.
 	int blockLength = fftArgs->last_sample_index - fftArgs->first_sample_index
 			+ 1;
 	int convLength = blockLength * 2;
@@ -1514,28 +2144,28 @@ void *calculateFFT(void *incomingFFTArgs) {
 	int volumeFactor = blockLength / g_block_length; // 1, 2, 4, 8, etc
 
 	complex *inputAudio = calloc(convLength, sizeof(complex));
-// 2. Take audio from g_input_storage_buffer (first_sample_index to last_sample_index)
-//    and place it into the buffer created in part 1 (0 to (last_sample_index - first_sample_index)).
+	// 2. Take audio from g_input_storage_buffer (first_sample_index to last_sample_index)
+	//    and place it into the buffer created in part 1 (0 to (last_sample_index - first_sample_index)).
 	for (i = 0; i < blockLength; i++) {
 		inputAudio[i].Re = g_input_storage_buffer[fftArgs->first_sample_index
-				+ i];
+												  + i];
 	}
 
-//	printf(
-//			"Thread %d: Start convolving sample %d to %d with h%d. This process will take %d cycles and complete when N = %d.\n",
-//			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
-//			fftArgs->impulse_block_number, numCyclesToWait + 1, counter_target);
+	//	printf(
+	//			"Thread %d: Start convolving sample %d to %d with h%d. This process will take %d cycles and complete when N = %d.\n",
+	//			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
+	//			fftArgs->impulse_block_number, numCyclesToWait + 1, counter_target);
 
-// 3. Take the FFT of the buffer created in part 1.
+	// 3. Take the FFT of the buffer created in part 1.
 	complex *temp = calloc(convLength, sizeof(complex));
 	fft(inputAudio, convLength, temp);
 
-// 4. Determine correct impulse FFT block based in impulse_block_number. The length of this
-//	  block should automatically be the same length as the length of the buffer created in part 1
-//    that now holds the input audio data.
+	// 4. Determine correct impulse FFT block based in impulse_block_number. The length of this
+	//	  block should automatically be the same length as the length of the buffer created in part 1
+	//    that now holds the input audio data.
 	int fftBlockNumber = fftArgs->impulse_block_number;
 
-// If the impulse is mono
+	// If the impulse is mono
 	if (g_impulse->numChannels == MONO) {
 
 		// 5. Create buffer of length 2 * (last_sample_index - first_sample_index) to hold the result of
@@ -1547,14 +2177,14 @@ void *calculateFFT(void *incomingFFTArgs) {
 
 		for (i = 0; i < convLength; i++) {
 
-//			if (g_changingImpulse || g_changes_made != state) {
-//				free(convResult);
-//				free(temp);
-//				free(inputAudio);
-//				free(fftArgs);
-//				pthread_exit(NULL);
-//				return NULL;
-//			}
+			//			if (g_changingImpulse || g_changes_made != state) {
+			//				free(convResult);
+			//				free(temp);
+			//				free(inputAudio);
+			//				free(fftArgs);
+			//				pthread_exit(NULL);
+			//				return NULL;
+			//			}
 
 			c = complex_mult(inputAudio[i],
 					g_fftData_ptr->fftBlocks1[fftBlockNumber][i]);
@@ -1571,18 +2201,26 @@ void *calculateFFT(void *incomingFFTArgs) {
 		//    the real values of the buffer created in part 5 into the g_output_storage_buffer
 		//    (sample 0 through sample 2 * (last_sample_index - first_sample_index)
 		while (g_counter != counter_target) {
+			if (g_changingImpulse) {
+				pthread_exit(NULL);
+			}
 			nanosleep((const struct timespec[] ) { {0,g_block_duration_in_nanoseconds/NUM_CHECKS_PER_CYCLE}}, NULL);
 		}
 
+		pthread_mutex_lock(&mutex);
 		// Put data in output buffer
+		if (g_output_storage_buffer1_length < convLength) {
+			convLength = g_output_storage_buffer1_length;
+		}
 		for (i = 0; i < convLength; i++) {
 			g_output_storage_buffer1[i] += convResult[i].Re / volumeFactor;
 		}
+		pthread_mutex_unlock(&mutex);
 
 		free(convResult);
 	}
 
-// If the impulse is stereo
+	// If the impulse is stereo
 	if (g_impulse->numChannels == STEREO) {
 
 		// 5. Create buffer of length 2 * (last_sample_index - first_sample_index) to hold the result of
@@ -1618,26 +2256,34 @@ void *calculateFFT(void *incomingFFTArgs) {
 		//    the real values of the buffer created in part 5 into the g_output_storage_buffer
 		//    (sample 0 through sample 2 * (last_sample_index - first_sample_index)
 		while (g_counter != counter_target) {
+			if (g_changingImpulse) {
+				pthread_exit(NULL);
+			}
 			nanosleep((const struct timespec[] ) { {0,g_block_duration_in_nanoseconds/NUM_CHECKS_PER_CYCLE}}, NULL);
 		}
 
+		pthread_mutex_lock(&mutex);
 		// Put data in output buffer
+		if (g_output_storage_buffer1_length < convLength) {
+			convLength = g_output_storage_buffer1_length;
+		}
 		for (i = 0; i < convLength; i++) {
 			g_output_storage_buffer1[i] += convResultLeft[i].Re / volumeFactor; // left channel
 			g_output_storage_buffer2[i] += convResultRight[i].Re / volumeFactor; // right channel
 		}
+		pthread_mutex_unlock(&mutex);
 
 		free(convResultLeft);
 		free(convResultRight);
 
 	}
 
-//	printf(
-//			"Thread %d: The result of the convolution of sample %d to %d with h%d has been added to the output buffer. Expected arrival: when n = %d.\n",
-//			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
-//			fftArgs->impulse_block_number, counter_target);
+	//	printf(
+	//			"Thread %d: The result of the convolution of sample %d to %d with h%d has been added to the output buffer. Expected arrival: when n = %d.\n",
+	//			pthread_self(), fftArgs->first_sample_index, fftArgs->last_sample_index,
+	//			fftArgs->impulse_block_number, counter_target);
 
-// Free remaining buffers
+	// Free remaining buffers
 	free(temp);
 	free(inputAudio);
 
@@ -1652,6 +2298,16 @@ void *calculateFFT(void *incomingFFTArgs) {
 static int paCallback(const void *inputBuffer, void *outputBuffer,
 		unsigned long framesPerBuffer, const PaStreamCallbackTimeInfo* timeInfo,
 		PaStreamCallbackFlags statusFlags, void *userData) {
+	paData *data = (paData *) userData;
+	if (AUDIO_FILE_INPUT) {
+		int readcount;
+		readcount = sf_readf_float(data->infile1, data->buffer1, framesPerBuffer);
+
+		if (readcount < framesPerBuffer) {
+			sf_seek(data->infile1, 0, SEEK_SET);
+			readcount = sf_readf_float(data->infile1, data->buffer1+(readcount*data->channels), framesPerBuffer-readcount);
+		}
+	}
 
 	float mult_factor = 0.00001f;
 
@@ -1675,10 +2331,10 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 
 			if (total > g_loudest) {
 				g_loudest = total;
-				printf("New loudest value: %f\n", g_loudest);
+				//				printf("New loudest value: %f\n", g_loudest);
 			}
 
-//			printf("Avg value: %f\n", total);
+			//			printf("Avg value: %f\n", total);
 
 			if (total > 0.5f) {
 				for (i = 0; i < framesPerBuffer; i++) {
@@ -1692,9 +2348,12 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 				}
 			} else {
 				g_consecutive_skipped_cycles = 0;
+				pthread_mutex_lock(&mutex);
 				for (i = 0; i < framesPerBuffer; i++) {
-					outBuf[i] = g_output_storage_buffer1[i]*mult_factor;
+					outBuf[i] = ((float) g_dry_wet/100)*g_output_storage_buffer1[i]*mult_factor + ((float) (100-g_dry_wet)/100)*g_input_storage_buffer[g_input_storage_buffer_length
+																																					   - g_block_length + i];
 				}
+				pthread_mutex_unlock(&mutex);
 			}
 		}
 
@@ -1714,14 +2373,14 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 
 			if (total_left > g_loudest) {
 				g_loudest = total_left;
-				printf("New loudest value: %f\n", g_loudest);
+				//				printf("New loudest value: %f\n", g_loudest);
 			}
 			if (total_right > g_loudest) {
 				g_loudest = total_right;
-				printf("New loudest value: %f\n", g_loudest);
+				//				printf("New loudest value: %f\n", g_loudest);
 			}
 
-//			printf("Avg value: %f\n", (total_left + total_right / 2));
+			//			printf("Avg value: %f\n", (total_left + total_right / 2));
 
 			if (total_left > 0.5f) {
 				for (i = 0; i < framesPerBuffer * 2; i++) {
@@ -1745,10 +2404,14 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 				}
 			} else {
 				g_consecutive_skipped_cycles = 0;
+				pthread_mutex_lock(&mutex);
 				for (i = 0; i < framesPerBuffer; i++) {
-					outBuf[2 * i] = g_output_storage_buffer1[i]*mult_factor;
-					outBuf[2 * i + 1] = g_output_storage_buffer2[i]*mult_factor;
+					outBuf[2 * i] = ((float) g_dry_wet/100)*g_output_storage_buffer1[i]*mult_factor + ((float) (100-g_dry_wet)/100)*g_input_storage_buffer[g_input_storage_buffer_length
+																																						   - g_block_length + i];
+					outBuf[2 * i + 1] = ((float) g_dry_wet/100)*g_output_storage_buffer2[i]*mult_factor + ((float) (100-g_dry_wet)/100)*g_input_storage_buffer[g_input_storage_buffer_length
+																																							   - g_block_length + i];
 				}
+				pthread_mutex_unlock(&mutex);
 			}
 		}
 
@@ -1761,23 +2424,39 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 		// Shift g_input_storage_buffer to the left by g_block_length
 		for (i = 0; i < g_input_storage_buffer_length - g_block_length; i++) {
 			g_input_storage_buffer[i] = g_input_storage_buffer[i
-					+ g_block_length];
+															   + g_block_length];
 		}
 
-		// Fill right-most portion of g_input_storage_buffer with most recent audio
-		for (i = 0; i < g_block_length; i++) {
-			g_input_storage_buffer[g_input_storage_buffer_length
-					- g_block_length + i] = inBuf[i];
+		if (AUDIO_FILE_INPUT) {
+			if (data->channels == MONO) {
+				for (i = 0; i < g_block_length; i++) {
+					g_input_storage_buffer[g_input_storage_buffer_length
+										   - g_block_length + i] = data->buffer1[i];
+				}
+			}
+			if (data->channels == STEREO) {
+				for (i = 0; i < g_block_length; i++) {
+					g_input_storage_buffer[g_input_storage_buffer_length
+										   - g_block_length + i] = (data->buffer1[2*i] + data->buffer1[2*i + 1])/2;
+				}
+			}
+		} else if (LIVE_AUDIO_INPUT) {
+			// Fill right-most portion of g_input_storage_buffer with most recent audio
+			for (i = 0; i < g_block_length; i++) {
+				g_input_storage_buffer[g_input_storage_buffer_length
+									   - g_block_length + i] = inBuf[i];
+			}
 		}
-//
-//		float total_input = 0.0f;
-//
-//		for (i=0; i<g_block_length; i++) {
-//			total_input += g_input_storage_buffer[g_input_storage_buffer_length
-//													- g_block_length + i];
-//		}
-//
-//		printf("Total input: %f\n", total_input);
+
+		//
+		//		float total_input = 0.0f;
+		//
+		//		for (i=0; i<g_block_length; i++) {
+		//			total_input += g_input_storage_buffer[g_input_storage_buffer_length
+		//													- g_block_length + i];
+		//		}
+		//
+		//		printf("Total input: %f\n", total_input);
 
 		/*
 		 * Create threads
@@ -1815,12 +2494,14 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 		}
 
 		// Shift g_output_storage_buffer
+		pthread_mutex_lock(&mutex);
 		for (i = 0; i < g_output_storage_buffer1_length - g_block_length; i++) {
 			g_output_storage_buffer1[i] = g_output_storage_buffer1[i
-					+ g_block_length];
+																   + g_block_length];
 			g_output_storage_buffer2[i] = g_output_storage_buffer2[i
-					+ g_block_length];
+																   + g_block_length];
 		}
+		pthread_mutex_unlock(&mutex);
 
 	} else {
 		/*
@@ -1846,6 +2527,31 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 		}
 	}
 
+	complex *input_temp = (complex *) malloc(MIN_FFT_BLOCK_SIZE * sizeof(complex));
+
+	// This assumes mono input
+	if (LIVE_AUDIO_INPUT) {
+		for (i=0; i<MIN_FFT_BLOCK_SIZE; i++) {
+			input_spectrum[i].Im = 0.0f;
+			input_spectrum[i].Re = inBuf[i];
+		}
+	}
+	if (AUDIO_FILE_INPUT) {
+		for (i=0; i<MIN_FFT_BLOCK_SIZE; i++) {
+			input_spectrum[i].Im = 0.0f;
+			input_spectrum[i].Re = data->buffer1[i];
+		}
+	}
+
+
+	fft(input_spectrum,MIN_FFT_BLOCK_SIZE,input_temp);
+	//
+	//	for (i=0; i<MIN_FFT_BLOCK_SIZE; i++) {
+	//		printf("Magnitude[%d]: %f\n", i, sqrt(pow(input_spectrum[i].Im, 2) + pow(input_spectrum[i].Re, 2)));
+	//	}
+
+	free(input_temp);
+
 	return paContinue;
 }
 
@@ -1853,62 +2559,143 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
  * This function is responsible for starting PortAudio and OpenGL.
  */
 void runPortAudio() {
-	PaStream* stream;
-	PaStreamParameters outputParameters;
-	PaStreamParameters inputParameters;
-	PaError err;
-	/* Initialize PortAudio */
-	Pa_Initialize();
-	/* Set output stream parameters */
-	outputParameters.device = Pa_GetDefaultOutputDevice();
-	outputParameters.channelCount = g_impulse->numChannels;
-	outputParameters.sampleFormat = paFloat32;
-	outputParameters.suggestedLatency = Pa_GetDeviceInfo(
-			outputParameters.device)->defaultLowOutputLatency;
-	outputParameters.hostApiSpecificStreamInfo = NULL;
-	/* Set input stream parameters */
-	inputParameters.device = Pa_GetDefaultInputDevice();
-	inputParameters.channelCount = MONO;
-	inputParameters.sampleFormat = paFloat32;
-	inputParameters.suggestedLatency =
-			Pa_GetDeviceInfo(inputParameters.device)->defaultLowInputLatency;
-	inputParameters.hostApiSpecificStreamInfo = NULL;
-	/* Open audio stream */
-	err = Pa_OpenStream(&stream, &inputParameters, &outputParameters,
-	SAMPLE_RATE, MIN_FFT_BLOCK_SIZE, paNoFlag, paCallback, NULL);
 
-	if (err != paNoError) {
-		printf("PortAudio error: open stream: %s\n", Pa_GetErrorText(err));
-	}
-	/* Start audio stream */
-	err = Pa_StartStream(stream);
-	if (err != paNoError) {
-		printf("PortAudio error: start stream: %s\n", Pa_GetErrorText(err));
-	}
+	if (AUDIO_FILE_INPUT) {
+		paData data;
+		PaStream* stream;
+		PaStreamParameters outputParams;
+		PaError err;
+		memset(&data.sfinfo1, 0, sizeof(data.sfinfo1));
+		data.infile1 = sf_open(audio_file_name, SFM_READ, &data.sfinfo1);
+		if (data.infile1 == NULL) {
+			printf("Error: could not open file: %s\n", audio_file_name);
+			puts(sf_strerror(NULL));
+			exit(1);
+		}
+		data.sampleRate = data.sfinfo1.samplerate;
+		data.amplitude1 = 1.0f;
+		data.channels = data.sfinfo1.channels;
 
-	glutMainLoop();
+		err = Pa_Initialize();
+		if (err != paNoError ) {
+			printf("PortAudio error: %s\n", Pa_GetErrorText(err));
+			printf("\nExiting.\n");
+			exit(1);
+		}
 
-	/* Get user input */
-	char ch = '0';
-	while (ch != 'q') {
-		printf("Press 'q' to finish execution: ");
-		ch = getchar();
-	}
+		/* Ouput stream parameters */
+		outputParams.device = Pa_GetDefaultOutputDevice();
+		outputParams.channelCount = g_impulse->numChannels;
+		outputParams.sampleFormat = paFloat32;
+		outputParams.suggestedLatency =
+				Pa_GetDeviceInfo(outputParams.device)->defaultLowOutputLatency;
+		outputParams.hostApiSpecificStreamInfo = NULL;
 
-	err = Pa_StopStream(stream);
-	/* Stop audio stream */
-	if (err != paNoError) {
-		printf("PortAudio error: stop stream: %s\n", Pa_GetErrorText(err));
-	}
-	/* Close audio stream */
-	err = Pa_CloseStream(stream);
-	if (err != paNoError) {
-		printf("PortAudio error: close stream: %s\n", Pa_GetErrorText(err));
-	}
-	/* Terminate audio stream */
-	err = Pa_Terminate();
-	if (err != paNoError) {
-		printf("PortAudio error: terminate: %s\n", Pa_GetErrorText(err));
+		/* Open audio stream */
+		err = Pa_OpenStream(&stream,
+				NULL, /* no input */
+				&outputParams,
+				data.sampleRate,
+				MIN_FFT_BLOCK_SIZE,
+				paNoFlag, /* flags */
+				paCallback,
+				&data);
+
+		if (err != paNoError) {
+			printf("PortAudio error: open stream: %s\n", Pa_GetErrorText(err));
+			exit(2);
+		}
+		err = Pa_StartStream(stream);
+		if (err != paNoError) {
+			printf(  "PortAudio error: start stream: %s\n", Pa_GetErrorText(err));
+			exit(3);
+		}
+
+		glutMainLoop();
+
+		/* Get user input */
+		char ch = '0';
+		while (ch != 'q') {
+			printf("Press 'q' to finish execution: ");
+			ch = getchar();
+		}
+
+		err = Pa_StopStream(stream);
+		/* Stop audio stream */
+		if (err != paNoError) {
+			printf("PortAudio error: stop stream: %s\n", Pa_GetErrorText(err));
+		}
+		/* Close audio stream */
+		err = Pa_CloseStream(stream);
+		if (err != paNoError) {
+			printf("PortAudio error: close stream: %s\n", Pa_GetErrorText(err));
+		}
+		/* Terminate audio stream */
+		err = Pa_Terminate();
+		if (err != paNoError) {
+			printf("PortAudio error: terminate: %s\n", Pa_GetErrorText(err));
+		}
+
+		sf_close(data.infile1);
+
+	} else {
+		PaStream* stream;
+		PaStreamParameters outputParameters;
+		PaStreamParameters inputParameters;
+		PaError err;
+		/* Initialize PortAudio */
+		Pa_Initialize();
+		/* Set output stream parameters */
+		outputParameters.device = Pa_GetDefaultOutputDevice();
+		outputParameters.channelCount = g_impulse->numChannels;
+		outputParameters.sampleFormat = paFloat32;
+		outputParameters.suggestedLatency = Pa_GetDeviceInfo(
+				outputParameters.device)->defaultLowOutputLatency;
+		outputParameters.hostApiSpecificStreamInfo = NULL;
+		/* Set input stream parameters */
+		inputParameters.device = Pa_GetDefaultInputDevice();
+		inputParameters.channelCount = MONO;
+		inputParameters.sampleFormat = paFloat32;
+		inputParameters.suggestedLatency =
+				Pa_GetDeviceInfo(inputParameters.device)->defaultLowInputLatency;
+		inputParameters.hostApiSpecificStreamInfo = NULL;
+		/* Open audio stream */
+		err = Pa_OpenStream(&stream, &inputParameters, &outputParameters,
+				SAMPLE_RATE, MIN_FFT_BLOCK_SIZE, paNoFlag, paCallback, NULL);
+
+		if (err != paNoError) {
+			printf("PortAudio error: open stream: %s\n", Pa_GetErrorText(err));
+		}
+		/* Start audio stream */
+		err = Pa_StartStream(stream);
+		if (err != paNoError) {
+			printf("PortAudio error: start stream: %s\n", Pa_GetErrorText(err));
+		}
+
+		glutMainLoop();
+
+		/* Get user input */
+		char ch = '0';
+		while (ch != 'q') {
+			printf("Press 'q' to finish execution: ");
+			ch = getchar();
+		}
+
+		err = Pa_StopStream(stream);
+		/* Stop audio stream */
+		if (err != paNoError) {
+			printf("PortAudio error: stop stream: %s\n", Pa_GetErrorText(err));
+		}
+		/* Close audio stream */
+		err = Pa_CloseStream(stream);
+		if (err != paNoError) {
+			printf("PortAudio error: close stream: %s\n", Pa_GetErrorText(err));
+		}
+		/* Terminate audio stream */
+		err = Pa_Terminate();
+		if (err != paNoError) {
+			printf("PortAudio error: terminate: %s\n", Pa_GetErrorText(err));
+		}
 	}
 }
 
@@ -1928,11 +2715,11 @@ float **getImpulseFFTBlocks(audioData *impulse_from_file, int channel) {
 	 */
 	int num_impulse_blocks = (impulse_from_file->numFrames / FFT_SIZE);
 
-// Allocate memory for array of filter envelope blocks
+	// Allocate memory for array of filter envelope blocks
 	float **impulse_filter_env_blocks = (float **) malloc(
 			sizeof(float *) * num_impulse_blocks);
 
-// Allocate memory each individual filter envelope
+	// Allocate memory each individual filter envelope
 	for (i = 0; i < num_impulse_blocks; i++) {
 		impulse_filter_env_blocks[i] = (float *) malloc(
 				sizeof(float) * FFT_SIZE);
@@ -2014,43 +2801,43 @@ float **getExponentialFitFromGraph(int num_impulse_blocks, int channel) {
 		x[i] = i;
 	}
 
-//	printf("x2: %d\n", (num_impulse_blocks-1));
+	//	printf("x2: %d\n", (num_impulse_blocks-1));
 
 	if (channel == LEFT) {
 		for (i = 0; i < HALF_FFT_SIZE; i++) {
 			float y1 = (top_vals_left[i] + (g_height_top - g_height_bottom)) * g_max
 					/ (g_height_top - g_height_bottom);
 			float y2 = bottom_vals_left[i];
-	//		float x1 = 0.0f;
+			//		float x1 = 0.0f;
 			float x2 = num_impulse_blocks - 1;
 
-	//		float sum_x = x2 + x1;
-	//		float sum_temp = y1 + y2;
-	//		float sum_x_times_x = pow(x1, 2) + pow(x2, 2);
-	//		float sum_temp_times_x = x1 * y1 + x2 * y2;
-	//
-	//		float b = (2 * sum_temp_times_x - sum_x * sum_temp)
-	//				/ (2 * sum_x_times_x - sum_x * sum_x);
-	//		float a = (sum_temp - b * sum_x) / 2;
-	//
-	//		float A = exp(a);
-	//
+			//		float sum_x = x2 + x1;
+			//		float sum_temp = y1 + y2;
+			//		float sum_x_times_x = pow(x1, 2) + pow(x2, 2);
+			//		float sum_temp_times_x = x1 * y1 + x2 * y2;
+			//
+			//		float b = (2 * sum_temp_times_x - sum_x * sum_temp)
+			//				/ (2 * sum_x_times_x - sum_x * sum_x);
+			//		float a = (sum_temp - b * sum_x) / 2;
+			//
+			//		float A = exp(a);
+			//
 			float a = y1;
 
 			float b = pow((y2 / a), (1 / x2));
 
-	//		printf("y1: %f, y2: %f, b: %f\n", y1, y2, b);
+			//		printf("y1: %f, y2: %f, b: %f\n", y1, y2, b);
 
-	//		printf(
-	//				"top_vals_left[i]: %f, y1: %f, y2: %f, x1: %f, x2: %f, b: %f, a: %f, A: %f\n",
-	//				top_vals_left[i], y1, y2, x1, x2, b, a, A);
+			//		printf(
+			//				"top_vals_left[i]: %f, y1: %f, y2: %f, x1: %f, x2: %f, b: %f, a: %f, A: %f\n",
+			//				top_vals_left[i], y1, y2, x1, x2, b, a, A);
 
 			for (j = 0; j < num_impulse_blocks; j++) {
 				impulse_filter_env_blocks_exp_fit[i][j] = a * pow(b, x[j]);
-	//			if (i == 0) {
-	//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
-	//						impulse_filter_env_blocks_exp_fit[i][j]);
-	//			}
+				//			if (i == 0) {
+				//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
+				//						impulse_filter_env_blocks_exp_fit[i][j]);
+				//			}
 			}
 
 		}
@@ -2059,36 +2846,36 @@ float **getExponentialFitFromGraph(int num_impulse_blocks, int channel) {
 			float y1 = (top_vals_right[i] + (g_height_top - g_height_bottom)) * g_max
 					/ (g_height_top - g_height_bottom);
 			float y2 = bottom_vals_right[i];
-	//		float x1 = 0.0f;
+			//		float x1 = 0.0f;
 			float x2 = num_impulse_blocks - 1;
 
-	//		float sum_x = x2 + x1;
-	//		float sum_temp = y1 + y2;
-	//		float sum_x_times_x = pow(x1, 2) + pow(x2, 2);
-	//		float sum_temp_times_x = x1 * y1 + x2 * y2;
-	//
-	//		float b = (2 * sum_temp_times_x - sum_x * sum_temp)
-	//				/ (2 * sum_x_times_x - sum_x * sum_x);
-	//		float a = (sum_temp - b * sum_x) / 2;
-	//
-	//		float A = exp(a);
-	//
+			//		float sum_x = x2 + x1;
+			//		float sum_temp = y1 + y2;
+			//		float sum_x_times_x = pow(x1, 2) + pow(x2, 2);
+			//		float sum_temp_times_x = x1 * y1 + x2 * y2;
+			//
+			//		float b = (2 * sum_temp_times_x - sum_x * sum_temp)
+			//				/ (2 * sum_x_times_x - sum_x * sum_x);
+			//		float a = (sum_temp - b * sum_x) / 2;
+			//
+			//		float A = exp(a);
+			//
 			float a = y1;
 
 			float b = pow((y2 / a), (1 / x2));
 
-	//		printf("y1: %f, y2: %f, b: %f\n", y1, y2, b);
+			//		printf("y1: %f, y2: %f, b: %f\n", y1, y2, b);
 
-	//		printf(
-	//				"top_vals_left[i]: %f, y1: %f, y2: %f, x1: %f, x2: %f, b: %f, a: %f, A: %f\n",
-	//				top_vals_left[i], y1, y2, x1, x2, b, a, A);
+			//		printf(
+			//				"top_vals_left[i]: %f, y1: %f, y2: %f, x1: %f, x2: %f, b: %f, a: %f, A: %f\n",
+			//				top_vals_left[i], y1, y2, x1, x2, b, a, A);
 
 			for (j = 0; j < num_impulse_blocks; j++) {
 				impulse_filter_env_blocks_exp_fit[i][j] = a * pow(b, x[j]);
-	//			if (i == 0) {
-	//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
-	//						impulse_filter_env_blocks_exp_fit[i][j]);
-	//			}
+				//			if (i == 0) {
+				//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
+				//						impulse_filter_env_blocks_exp_fit[i][j]);
+				//			}
 			}
 
 		}
@@ -2134,7 +2921,7 @@ float **getExponentialFitForImpulseFFTBlocks(int num_impulse_blocks,
 		float *temp = (float *) malloc(
 				sizeof(float) * num_nonzero_impulse_blocks);
 		for (j = 0; j < n; j++) {
-			temp[j] = log(impulse_filter_env_blocks[j][i]);
+			temp[j] = log(impulse_filter_env_blocks[j][i + 1]); // i + 1 because index of 0 = DC
 		}
 
 		float sum_x_times_x = 0.0f;
@@ -2150,17 +2937,17 @@ float **getExponentialFitForImpulseFFTBlocks(int num_impulse_blocks,
 		}
 
 		float b = (n * sum_temp_times_x - sum_x * sum_temp)
-				/ (n * sum_x_times_x - sum_x * sum_x);
+						/ (n * sum_x_times_x - sum_x * sum_x);
 		float a = (sum_temp - b * sum_x) / n;
 
 		float A = exp(a);
 		for (j = 0; j < num_impulse_blocks; j++) {
 
 			impulse_filter_env_blocks_exp_fit[i][j] = A * exp(b * x[j]);
-//			if (i == 0) {
-//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
-//						impulse_filter_env_blocks_exp_fit[i][j]);
-//			}
+			//			if (i == 0) {
+			//				printf("impulse_filter_env_blocks_exp_fit[%d][%d]: %f\n", i, j,
+			//						impulse_filter_env_blocks_exp_fit[i][j]);
+			//			}
 		}
 
 		if (g_max < impulse_filter_env_blocks_exp_fit[i][0]) {
@@ -2221,7 +3008,7 @@ float *getAmplitudeEnvelope(audioData *impulse_from_file, int channel) {
 
 		for (j = 0; j < SMOOTHING_AMT; j++) {
 			envelope[i * SMOOTHING_AMT + j] = avg_amplitudes[i]
-					+ (j * increment);
+															 + (j * increment);
 		}
 
 	}
@@ -2270,7 +3057,7 @@ float *getExponentialFitForAmplitudeEnvelope(float *envelope,
 	}
 
 	float b = (length * sum_temp_times_x - sum_x * sum_temp)
-			/ (length * sum_x_times_x - sum_x * sum_x);
+					/ (length * sum_x_times_x - sum_x * sum_x);
 	float a = (sum_temp - b * sum_x) / length;
 
 	float A = exp(a);
@@ -2314,8 +3101,21 @@ float *getFilteredWhiteNoise(audioData *impulse_from_file,
 		/*
 		 * Actually apply frequency-domain filter
 		 */
-		for (j = 0; j < FFT_SIZE; j++) {
 
+//		// set DC to 0
+//		fftBlock[0].Re = 0.1f;
+//		fftBlock[0].Im = 0.0f;
+//
+//		// If FFT_SIZE = 512, then this goes from 1 to 256 inclusive
+//		for (j = 1; j < FFT_SIZE / 2 + 1; j++) {
+//			fftBlock[2*j - 1].Re *= impulse_filter_env_blocks_exp_fit[j-1][i];
+//			fftBlock[2*j].Re *= impulse_filter_env_blocks_exp_fit[j-1][i];
+//			fftBlock[2 * FFT_SIZE - 2*j + 1].Re *= impulse_filter_env_blocks_exp_fit[j-1][i];
+//			fftBlock[2 * FFT_SIZE - 2*j].Re *= impulse_filter_env_blocks_exp_fit[j-1][i];
+//		}
+
+
+		for (j = 0; j < FFT_SIZE; j++) {
 			if (j < FFT_SIZE / 2) {
 				fftBlock[2 * j].Re *= impulse_filter_env_blocks_exp_fit[j][i];
 				fftBlock[2 * j + 1].Re *=
@@ -2325,16 +3125,17 @@ float *getFilteredWhiteNoise(audioData *impulse_from_file,
 						impulse_filter_env_blocks_exp_fit[j][i];
 			} else {
 				fftBlock[2 * j].Re *= impulse_filter_env_blocks_exp_fit[FFT_SIZE
-						- j - 1][i];
+																		- j - 1][i];
 				fftBlock[2 * j + 1].Re *=
 						impulse_filter_env_blocks_exp_fit[FFT_SIZE - j - 1][i];
 				fftBlock[2 * j].Im *= impulse_filter_env_blocks_exp_fit[FFT_SIZE
-						- j - 1][i];
+																		- j - 1][i];
 				fftBlock[2 * j + 1].Im *=
 						impulse_filter_env_blocks_exp_fit[FFT_SIZE - j - 1][i];
 			}
-
 		}
+
+
 
 		ifft(fftBlock, FFT_SIZE * 2, temp);
 
@@ -2383,7 +3184,7 @@ void applyAmplitudeEnvelope(audioData *impulse_from_file,
 
 	for (i = 0; i < impulse_from_file->numFrames; i++) {
 		differences[i] = envelope[i] / exp_fit[i];
-//		printf("differences[%d]: %f/%f: %f\n", i, envelope[i], exp_fit[i], differences[i]);
+		//		printf("differences[%d]: %f/%f: %f\n", i, envelope[i], exp_fit[i], differences[i]);
 	}
 
 	/*
@@ -2391,7 +3192,7 @@ void applyAmplitudeEnvelope(audioData *impulse_from_file,
 	 */
 	for (i = 0; i < impulse_from_file->numFrames; i++) {
 
-//		synthesized_impulse_buffer[i] *= differences[i];
+		//		synthesized_impulse_buffer[i] *= differences[i];
 
 		if (fabsf(synthesized_impulse_buffer[i]) > output_max) {
 			output_max = fabsf(synthesized_impulse_buffer[i]);
@@ -2399,7 +3200,7 @@ void applyAmplitudeEnvelope(audioData *impulse_from_file,
 
 	}
 
-	output_max /= synthesized_impulse_gain_factor;
+//	output_max /= synthesized_impulse_gain_factor;
 
 	for (i = 0; i < impulse_from_file->numFrames; i++) {
 		synthesized_impulse_buffer[i] /= output_max;
@@ -2417,9 +3218,11 @@ void setTopValsBasedOnImpulseFFTBlocks(
 	if (channel == LEFT) {
 		for (i = 0; i < FFT_SIZE / 2; i++) {
 
+			// Divide by g_max in order to normalize values
+			// g_max = maximum complex amplitude of impulse
 			top_vals_left[i] = ((g_height_top - g_height_bottom) - (impulse_filter_env_blocks_exp_fit[i][0] * (g_height_top - g_height_bottom) / g_max)) * -1;
 
-	//		printf("exp_fit_val[%d][0]: %f, top_vals_left[%d]: %f\n", i, impulse_filter_env_blocks_exp_fit[i][0], i, top_vals_left[i]);
+			//		printf("exp_fit_val[%d][0]: %f, top_vals_left[%d]: %f\n", i, impulse_filter_env_blocks_exp_fit[i][0], i, top_vals_left[i]);
 
 			bottom_vals_left[i] = 0.0001f;
 
@@ -2427,9 +3230,10 @@ void setTopValsBasedOnImpulseFFTBlocks(
 	} else if (channel == RIGHT) {
 		for (i = 0; i < FFT_SIZE / 2; i++) {
 
+			// Divide by g_max in order to normalize values
 			top_vals_right[i] = ((g_height_top - g_height_bottom) - (impulse_filter_env_blocks_exp_fit[i][0] * (g_height_top - g_height_bottom) / g_max)) * -1;
 
-	//		printf("exp_fit_val[%d][0]: %f, top_vals_left[%d]: %f\n", i, impulse_filter_env_blocks_exp_fit[i][0], i, top_vals_left[i]);
+			//		printf("exp_fit_val[%d][0]: %f, top_vals_left[%d]: %f\n", i, impulse_filter_env_blocks_exp_fit[i][0], i, top_vals_left[i]);
 
 			bottom_vals_right[i] = 0.0001f;
 
@@ -2448,7 +3252,7 @@ void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
 		return;
 	}
 
-// Create window for use in crossfading
+	// Create window for use in crossfading
 	float *window = (float *) malloc(sizeof(float) * crossover_length * 2);
 	create_hanning(window, crossover_length * 2);
 
@@ -2465,23 +3269,23 @@ void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
 	}
 
 
-// Fade between original and synthesized impulse over crossover length
+	// Fade between original and synthesized impulse over crossover length
 	for (i = 0; i < crossover_length; i++) {
 
 		float original_component = 0.0f;
 		if (channel == LEFT) {
 			// Use second half of hanning window to fade out original component
 			original_component = impulse_from_file->buffer1[crossover_point
-					+ i] * window[crossover_length + i];
+															+ i] * window[crossover_length + i];
 		} else if (channel == RIGHT) {
 			// Use second half of hanning window to fade out original component
 			original_component = impulse_from_file->buffer2[crossover_point
-					+ i] * window[crossover_length + i];
+															+ i] * window[crossover_length + i];
 		}
 
 		// Use first half of hanning window to fade in synthesized component
 		float synthesized_component = synthesized_impulse_buffer[crossover_point
-				+ i] * window[i];
+																 + i] * window[i];
 
 		// Sum the two together to complete the crossfade
 		synthesized_impulse_buffer[crossover_point + i] = original_component
@@ -2495,10 +3299,10 @@ void crossfadeRecordedAndSynthesizedImpulses(float* synthesized_impulse_buffer,
 audioData *resynthesizeImpulse(audioData *currentImpulse, int newLengthInFrames) {
 
 	int i;
-// Preliminary calculations/processes
+	// Preliminary calculations/processes
 	audioData *synth_impulse = (audioData *) malloc(sizeof(audioData));
-//	int length = currentImpulse->numFrames;
-//	int num_impulse_blocks = (currentImpulse->numFrames / FFT_SIZE);
+	//	int length = currentImpulse->numFrames;
+	//	int num_impulse_blocks = (currentImpulse->numFrames / FFT_SIZE);
 
 	// Put synthesized impulse in audioData struct
 	synth_impulse->numChannels = currentImpulse->numChannels;
@@ -2516,11 +3320,13 @@ audioData *resynthesizeImpulse(audioData *currentImpulse, int newLengthInFrames)
 		float **exp_fit = getExponentialFitFromGraph(
 				synth_impulse->numFrames / FFT_SIZE, LEFT);
 
-		setTopValsBasedOnImpulseFFTBlocks(exp_fit, LEFT);
+//		setTopValsBasedOnImpulseFFTBlocks(exp_fit, LEFT);
 
 		//Then, filter white noise with this exponential fit data.
 		float *synthesized_impulse_buffer = getFilteredWhiteNoise(
 				synth_impulse, exp_fit);
+
+		g_amp_envelope = getAmplitudeEnvelope(synth_impulse, LEFT);
 
 		//Then, apply amp envelope.
 		applyAmplitudeEnvelope(synth_impulse, synthesized_impulse_buffer,
@@ -2531,9 +3337,9 @@ audioData *resynthesizeImpulse(audioData *currentImpulse, int newLengthInFrames)
 				currentImpulse, LEFT);
 
 		// Write to a wav file
-//		writeWavFile(synthesized_impulse_buffer, SAMPLE_RATE,
-//				synth_impulse->numChannels, synth_impulse->numFrames, 1,
-//				"11_10_2015_test.wav");
+		//		writeWavFile(synthesized_impulse_buffer, SAMPLE_RATE,
+		//				synth_impulse->numChannels, synth_impulse->numFrames, 1,
+		//				"11_10_2015_test.wav");
 
 		// Put synthesized impulse in audioData struct
 		synth_impulse->buffer1 = synthesized_impulse_buffer;
@@ -2569,6 +3375,8 @@ audioData *resynthesizeImpulse(audioData *currentImpulse, int newLengthInFrames)
 		float *synthesized_impulse_buffer_right = getFilteredWhiteNoise(
 				synth_impulse, exp_fit_right);
 
+		g_amp_envelope = getAmplitudeEnvelope(synth_impulse, LEFT);
+
 		//Then, apply amp envelope.
 		applyAmplitudeEnvelope(synth_impulse, synthesized_impulse_buffer_left,
 				g_amp_envelope);
@@ -2582,9 +3390,9 @@ audioData *resynthesizeImpulse(audioData *currentImpulse, int newLengthInFrames)
 				currentImpulse, RIGHT);
 
 		// Write to a wav file
-//		writeWavFile(synthesized_impulse_buffer, SAMPLE_RATE,
-//				synth_impulse->numChannels, synth_impulse->numFrames, 1,
-//				"11_10_2015_test.wav");
+		//		writeWavFile(synthesized_impulse_buffer, SAMPLE_RATE,
+		//				synth_impulse->numChannels, synth_impulse->numFrames, 1,
+		//				"11_10_2015_test.wav");
 
 		// Put synthesized impulse in audioData struct
 		synth_impulse->buffer1 = synthesized_impulse_buffer_left;
@@ -2607,10 +3415,13 @@ audioData *resynthesizeImpulse(audioData *currentImpulse, int newLengthInFrames)
 		}
 	}
 
-//	free(g_impulse);
+	// Free all data from previous impulse
+	free(currentImpulse->buffer1);
+	free(currentImpulse->buffer2);
+	//	free(g_impulse);
 	g_impulse = synth_impulse;
 
-//Then, recalculate all the stuff in loadImpulse() based on the resynthesized impulse.
+	//Then, recalculate all the stuff in loadImpulse() based on the resynthesized impulse.
 	return synth_impulse;
 }
 
@@ -2619,7 +3430,7 @@ audioData *resynthesizeImpulse(audioData *currentImpulse, int newLengthInFrames)
  */
 audioData *synthesizeImpulse(char *fileName) {
 
-// Preliminary calculations/processes
+	// Preliminary calculations/processes
 	audioData *impulse_from_file = fileToBuffer(fileName);
 	audioData *synth_impulse = (audioData *) malloc(sizeof(audioData));
 	int length_before_zero_padding = impulse_from_file->numFrames;
@@ -2672,10 +3483,10 @@ audioData *synthesizeImpulse(char *fileName) {
 		crossfadeRecordedAndSynthesizedImpulses(synthesized_impulse_buffer,
 				impulse_from_file, LEFT);
 
-//		// Write to a wav file
-//		writeWavFile(synthesized_impulse_buffer, impulse_from_file->sampleRate,
-//				impulse_from_file->numChannels, impulse_from_file->numFrames, 1,
-//				"11_6_2015_test.wav");
+		//		// Write to a wav file
+		//		writeWavFile(synthesized_impulse_buffer, impulse_from_file->sampleRate,
+		//				impulse_from_file->numChannels, impulse_from_file->numFrames, 1,
+		//				"11_6_2015_test.wav");
 
 		// Put synthesized impulse in audioData struct
 		synth_impulse->buffer1 = synthesized_impulse_buffer;
@@ -2742,10 +3553,10 @@ audioData *synthesizeImpulse(char *fileName) {
 		crossfadeRecordedAndSynthesizedImpulses(synthesized_impulse_buffer_right,
 				impulse_from_file, RIGHT);
 
-//		// Write to a wav file
-//		writeWavFile(synthesized_impulse_buffer, impulse_from_file->sampleRate,
-//				impulse_from_file->numChannels, impulse_from_file->numFrames, 1,
-//				"11_6_2015_test.wav");
+		//		// Write to a wav file
+		//		writeWavFile(synthesized_impulse_buffer, impulse_from_file->sampleRate,
+		//				impulse_from_file->numChannels, impulse_from_file->numFrames, 1,
+		//				"11_6_2015_test.wav");
 
 		// Put synthesized impulse in audioData struct
 		synth_impulse->buffer1 = synthesized_impulse_buffer_left;
@@ -2763,15 +3574,22 @@ audioData *synthesizeImpulse(char *fileName) {
  */
 void loadImpulse(char *name) {
 	g_impulse = synthesizeImpulse(name);
-//	impulse = fileToBuffer("churchIR.wav");
-	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
+	//	impulse = fileToBuffer("churchIR.wav");
+//	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
 	g_impulse_length = g_impulse->numFrames;
 	g_impulse_num_frames = g_impulse->numFrames;
 	Vector blockLengthVector = determineBlockLengths(g_impulse);
 	BlockData* data_ptr = allocateBlockBuffers(blockLengthVector, g_impulse);
 	partitionImpulseIntoBlocks(blockLengthVector, data_ptr, g_impulse);
 	g_fftData_ptr = allocateFFTBuffers(data_ptr, blockLengthVector, g_impulse);
-
+	for (int i=0; i<blockLengthVector.size; i++) {
+		free(data_ptr->audioBlocks1[i]);
+		free(data_ptr->audioBlocks2[i]);
+	}
+	free(data_ptr->audioBlocks1);
+	free(data_ptr->audioBlocks2);
+	free(data_ptr);
+	vector_free(&blockLengthVector);
 }
 
 /*
@@ -2784,31 +3602,63 @@ void initializePowerOf2Vector() {
 	while (pow(2, counter) <= g_max_factor) {
 		vector_append(&g_powerOf2Vector, pow(2, counter++));
 	}
+	//	for (int i=0; i<g_powerOf2Vector.size; i++) {
+	//		printf("the powerOf2Vector[%d]: %d\n", i, vector_get(&g_powerOf2Vector, i));
+	//	}
 }
 
 /*
  * This function reloads an impulse after changes have been made
  */
 void reloadImpulse() {
-//	free_audioData(g_impulse);
+	//	free_audioData(g_impulse);
 	g_impulse = resynthesizeImpulse(g_impulse, g_impulse_num_frames);
 	g_impulse = zeroPadToNextPowerOfTwo(g_impulse);
 	g_impulse_length = g_impulse->numFrames;
 	Vector blockLengthVector = determineBlockLengths(g_impulse);
 	BlockData* data_ptr = allocateBlockBuffers(blockLengthVector, g_impulse);
 	partitionImpulseIntoBlocks(blockLengthVector, data_ptr, g_impulse);
-//	free(g_fftData_ptr);
+	//	free(g_fftData_ptr);
 	g_fftData_ptr = allocateFFTBuffers(data_ptr, blockLengthVector, g_impulse);
+	for (int i=0; i<blockLengthVector.size; i++) {
+		free(data_ptr->audioBlocks1[i]);
+		free(data_ptr->audioBlocks2[i]);
+	}
+	free(data_ptr->audioBlocks1);
+	free(data_ptr->audioBlocks2);
+	free(data_ptr);
+	vector_free(&blockLengthVector);
 	initializeGlobalParameters();
 	initializePowerOf2Vector();
 }
 
 void setWindowRange() {
 	// For displaying impulse
-	g_bottom_of_display = g_height - 40;
-	g_top_of_display = 120;
-	g_left_of_display = 40;
-	g_right_of_display = g_width - 40;
+	impulseWindow->edge_margin = 20;
+	impulseWindow->margin_top = 120;
+	impulseWindow->margin_bottom = g_height - 80;
+	impulseWindow->margin_left = 40;
+	impulseWindow->margin_right = g_width - 40;
+	float range = (float) (impulseWindow->margin_bottom - impulseWindow->margin_top);
+	impulseWindow->top_line = (int) (range * impulseWindow->top_line_percent) + impulseWindow->margin_top;
+	impulseWindow->mid_line = (int) (range * impulseWindow->mid_line_percent) + impulseWindow->margin_top;
+	impulseWindow->bottom_line = (int) (range * impulseWindow->bottom_line_percent) + impulseWindow->margin_top;
+
+	impulseHorizontalSelect->top_left.x = impulseWindow->margin_left;
+	impulseHorizontalSelect->top_left.y = impulseWindow->margin_bottom + impulseWindow->edge_margin  + 10;
+
+	impulseHorizontalSelect->top_right.x = impulseWindow->margin_right;
+	impulseHorizontalSelect->top_right.y = impulseWindow->margin_bottom + impulseWindow->edge_margin + 10;
+
+	impulseHorizontalSelect->bottom_left.x = impulseWindow->margin_left;
+	impulseHorizontalSelect->bottom_left.y = g_height - 10;
+
+	impulseHorizontalSelect->bottom_right.x = impulseWindow->margin_right;
+	impulseHorizontalSelect->bottom_right.y = g_height - 10;
+
+	range = (float) (impulseHorizontalSelect->top_right.x - impulseHorizontalSelect->top_left.x);
+	impulseHorizontalSelect->left_bound = (int) (range * impulseHorizontalSelect->left_bound_percent) + impulseHorizontalSelect->top_left.x;
+	impulseHorizontalSelect->right_bound = (int) (range * impulseHorizontalSelect->right_bound_percent) + impulseHorizontalSelect->top_left.x;
 }
 
 void initializeImpulseLengthSlider() {
@@ -2820,20 +3670,64 @@ void initializeImpulseLengthSlider() {
 	int impulse_num_frames_range = impulse_num_frames_max
 			- impulse_num_frames_min;
 	float offset = (float) (g_impulse->numFrames - impulse_num_frames_min)
-			/ (float) impulse_num_frames_range;
+					/ (float) impulse_num_frames_range;
 	int sliderInitPos = offset * ((float) range) + impulse_length_min;
 	ImpulseLengthSlider.x_min = 235;
 	ImpulseLengthSlider.x_max = 325;
 	ImpulseLengthSlider.x_pos = sliderInitPos;
 	ImpulseLengthSlider.y = 65;
-	ImpulseLengthSlider.min_val = 4410;
+	ImpulseLengthSlider.min_val = 44100;
 	ImpulseLengthSlider.max_val = 44100 * 20;
 	ImpulseLengthSlider.current_val = g_impulse->numFrames;
 	ImpulseLengthSlider.label = "Length";
 	ImpulseLengthSlider.state = 0;
 	ImpulseLengthSlider.callbackFunction = ImpulseLengthSliderCallback;
-	printf("impulse_length: %f seconds\n",
-			(float) g_impulse->numFrames / SAMPLE_RATE);
+	//	printf("impulse_length: %f seconds\n",
+	//			(float) g_impulse->numFrames / SAMPLE_RATE);
+}
+
+GraphData *getValuesFromGraph(int current_channel) {
+	//TODO: manipulate values that are in the selected range
+	int first_index = 0;
+	int last_index = 0;
+	bool started = false;
+	bool finished = false;
+	for (int i=0; i<HALF_FFT_SIZE; i++) {
+		if (impulseWindow->margin_left + x_values[i] > impulseHorizontalSelect->left_bound && impulseWindow->margin_left + x_values[i] < impulseHorizontalSelect->right_bound) {
+			if (started == false) {
+				first_index = i;
+				started = true;
+			}
+		} else if (started && !finished) {
+			last_index = i-1;
+			finished = true;
+		}
+	}
+	if (last_index - first_index == 0) {
+		return NULL;
+	}
+
+	GraphData *graphData = (GraphData *) malloc(sizeof(GraphData));
+	graphData->first_index = first_index;
+	graphData->last_index = last_index;
+	int length = last_index - first_index + 1;
+	graphData->length = length;
+	graphData->x_indices = (int *) malloc(sizeof(int) * length);
+	graphData->y_values = (float *) malloc(sizeof(float) * length);
+
+	if (current_channel == LEFT) {
+		for (int i=0; i<length; i++) {
+			graphData->x_indices[i] = x_values[graphData->first_index + i];
+			graphData->y_values[i] = top_vals_left[graphData->first_index + i];
+		}
+	} else if (current_channel == RIGHT) {
+		for (int i=0; i<length; i++) {
+			graphData->x_indices[i] = x_values[graphData->first_index + i];
+			graphData->y_values[i] = top_vals_right[graphData->first_index + i];
+		}
+	}
+
+	return graphData;
 }
 
 /*
@@ -2843,9 +3737,35 @@ int main(int argc, char **argv) {
 
 	srand(time(NULL));
 
+	for (int i=0; i<HALF_FFT_SIZE; i++) {
+		for (int j=0; j<16; j++) {
+			last_input_spectrum[j][i] = 0.0f;
+		}
+	}
+
+	input_spectrum = (complex *) malloc(MIN_FFT_BLOCK_SIZE * sizeof(complex));
+
+	impulseWindow = (ImpulseWindow *) malloc(sizeof(ImpulseWindow));
+	impulseHorizontalSelect = (ImpulseHorizontalSelect *) malloc(sizeof(ImpulseHorizontalSelect));
+
+	impulseHorizontalSelect->left_bound_percent = 0.33;
+	impulseHorizontalSelect->right_bound_percent = 0.66;
+	impulseHorizontalSelect->left_bound_selected = false;
+	impulseHorizontalSelect->right_bound_selected = false;
+
+	impulseWindow->top_line_percent = 0.25;
+	impulseWindow->mid_line_percent = 0.50;
+	impulseWindow->bottom_line_percent = 0.75;
+	impulseWindow->top_line_selected = false;
+	impulseWindow->mid_line_selected = false;
+	impulseWindow->bottom_line_selected = false;
+
+
 	setWindowRange();
 
-	loadImpulse("resources/Factory Hall.wav");
+	loadImpulse(IMPULSE_FILE_NAME);
+
+	audio_file_name = AUDIO_FILE_NAME;
 
 	initializeImpulseLengthSlider();
 

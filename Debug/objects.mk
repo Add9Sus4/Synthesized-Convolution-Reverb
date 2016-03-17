@@ -4,5 +4,5 @@
 
 USER_OBJS :=
 
-LIBS := -lsndfile -lportaudio
+LIBS := -lsndfile -lpthread -lportaudio
 
