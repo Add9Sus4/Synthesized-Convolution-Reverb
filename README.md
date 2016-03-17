@@ -27,7 +27,7 @@ file formats supported by [libsndfile](http://www.mega-nerd.com/libsndfile/) sho
 
 ##### User Interface
 
-![](resources/SynthesizedConvolutionReverbGUI.tiff)
+![](resources/other/SynthesizedConvolutionReverbGUI_2.tiff)
 
 ###### Frequency Graph
 
@@ -47,6 +47,9 @@ on the screen.
 * Randomize
  * This button randomizes the magnitude each frequency bin, within a range.
  * Currently, the range of randomization is specified, but future work will include giving the user control over this parameter.
+ 
+* Reverse bins
+ * If more than one bin is selected, this button reverses the values of these bins within the selected range.
 
 ###### Sliders
 
@@ -81,11 +84,22 @@ on the screen.
  * In the future, this value should be probably controlled by a set of radio buttons or a dropdown menu instead of a slider.
  * Additionally, for stereo impulses there should be a way to view and edit both channels at once, and this feature is on the current list of improvements.
  
-### Current issues/bugs
+* Dry/Wet
+
+ * This slider controls the mix between the dry input signal and the reverberation.
  
-Currently, there are some clicks that occur during the course of running the application. I am not sure exactly what is causing the clicks, but
-it might have to do with the multithreading problems mentioned earlier. The clicks are soft enough that the user can still easily hear the intended
-result of the convolution reverb, but loud enough that the application in its current state would be unsuitable for any real-world application.
+* Input Sensitivity
+
+ * This slider controls the amount with which the input signal frequency display is boosted. The window will show a real-time frequency display of incoming audio over top of the impulse frequency bins, and the input sensitivity slider can be used to make this frequency display more visible by boosting the input values before sending them to the graph. 
+ * The slider also dynamically adjusts its value to prevent peaks from getting so large that they extend above the top of the window.
+ 
+* Frequency range (at the bottom)
+ * Below the main window is an adjustable slider that can be used to set a range of frequencies that the user would like to adjust. Currently, the only process that can be made on this range of frequencies is the Reverse Bins process (mentioned above in the Buttons section), but I plan to add many more options that can be used to adjust bin values in different ways.
+ 
+* Top/Mid/Bottom vertical bars
+ * The main window contains three bars, which will eventually be used to set ranges for frequency bin transformations (they currently do nothing at the moment). The top and bottom bars will be used to specify a vertical range for transformations such as normalization, while the middle bar will be used for transformations such as "flip about center."
+ 
+### Current issues/bugs
 
 Sometimes, synthesizing a new impulse will result in absurdly high output values. To handle this until it is fixed, I have written code to detect
 these glitches and mute the output until they are gone. Often, simply resynthesizing the same impulse again fixes the problem, so in these
@@ -96,9 +110,9 @@ of this problem.
 
 ###### Fixing the multithreading
 
-Obviously, this application in its current state misuses multithreading technology, and memory corruption occurs as a result.
-I am working on learning more about multithreaded applications so I can make the software thread-safe while still ensuring that the
-main audio callback function is not impeded by any of the other threads performing convolution.
+Right now, there are some issues with threads not being properly terminated when a new impulse is synthesized. I believe this might be the cause of some of the glitching mentioned above. Threads exit if they are waiting when the impulse is changed; however, if a thread is writing data to the output buffer when the impulse is changed, it will continue to do so even if the impulse changes while this is happening. This needs to be fixed - all threads should exit immediately when the impulse is changed, and all output buffers should be reset to prepare for the new impulse and new threads that will be generated. 
+
+I think this can be achieved by making sure that all threads writing data to the output buffer finish doing this before the impulse is resynthesized. I'm already tracking the number of threads running at any given time, so I can verify that all threads have finished executing and only then resynthesize the impulse. Hopefully this will solve any of the problems that could result from a thread trying to write to a buffer and then having that buffer change size while this is happening (just one example of something that could go wrong, given the current state of the program).
 
 ###### Fixing the overall structure of the program
 
@@ -109,12 +123,6 @@ readily be pasted into a book on how not to write code.
 However, I plan to redesign the entire application and rewrite it in C++, obeying OOP principles like "don't repeat yourself" and "use the lowest level
 of scope possible" and other best practices. I believe this will make it much easier to identify bugs in the code, and it will make the entire
 application easier to read and understand, both for me and for anyone else that works on it.
-
-###### Fixing the clicks, the bursts of noise, and other glitches
-
-There is no reason why this program has to allow glitches in the audio. Plenty of convolution reverb plugins already exist and none of them have that
-problem, so it's just a matter of identifying the source of glitches and correcting them. This might take additional time and knowledge, but eventually
-I will fix these problems.
 
 ###### Developing the application into a plugin (AU, VST, RTAS, etc)
 
@@ -153,4 +161,7 @@ at the same time, with the current channel highlighted and the other faded sligh
  * Smoothness of random values - a way to control the continuity between adjacent random values.
 * Add the ability to choose the overlap point between the synthesized tail and the recorded beginning of the impulse.
 * Add the ability to change the beginning of the impulse without affecting the synthesized tail.
+* Add the ability to perform various modifications to the frequency bins, such as reverse, normalize within range, randomize order, copy and paste, enhance resonances, etc.
+* Give the user control over parameters that affect envelopment. This could be done by having a slider called "envelopment" or "spaciousness" and then have this control the inter-aural cross-correlation of the impulse. This could also have the added benefit of taking a mono impulse and making it stereo.
+* Make it possible to adjust the early reflections separately from the impulse tail. This might involve writing an algorithm to extract early reflection offset times from an impulse, and then cutting these sections out and spacing them either further apart or closer together and interpolating between them to maintain a continuous sound.
 
