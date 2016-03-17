@@ -22,6 +22,7 @@
 							<tool id="cdt.managedbuild.tool.macosx.c.linker.macosx.exe.debug.1870512524" name="MacOS X C Linker" superClass="cdt.managedbuild.tool.macosx.c.linker.macosx.exe.debug">
 								<option id="macosx.c.link.option.libs.1704938310" name="Libraries (-l)" superClass="macosx.c.link.option.libs" valueType="libs">
 									<listOptionValue builtIn="false" value="sndfile"/>
+									<listOptionValue builtIn="false" value="pthread"/>
 									<listOptionValue builtIn="false" value="portaudio"/>
 								</option>
 								<option id="macosx.c.link.option.ldflags.245057185" name="Linker flags" superClass="macosx.c.link.option.ldflags" value="-framework OpenGL -framework GLUT -Wno-deprecated-declarations" valueType="string"/>
