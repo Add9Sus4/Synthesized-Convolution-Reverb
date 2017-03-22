@@ -27,7 +27,7 @@ file formats supported by [libsndfile](http://www.mega-nerd.com/libsndfile/) sho
 
 ##### User Interface
 
-![](resources/other/SynthesizedConvolutionReverbGUI_2.tiff)
+![](resources/other/SynthesizedConvolutionReverbGUI_2.jpg)
 
 ###### Frequency Graph
 
