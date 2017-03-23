@@ -3,6 +3,8 @@
 This software was created as part of my Master's Thesis in Music Technology at New York University. Good news - I passed the
 defense! My thesis document can be found [here](https://add9sus4.files.wordpress.com/2017/01/aarondawsonnyuthesis2016.pdf).
 
+![](resources/other/SynthesizedConvolutionReverbGUI_2.jpg)
+
 This application synthesizes room impulses for use in convolution reverb.
 It works according to the following procedure:
 
@@ -27,10 +29,6 @@ changes they have made.
 
 The project currently works for mono and stereo impulses. Audio I/O is performed using the [libsndfile](http://www.mega-nerd.com/libsndfile/) library, so all
 file formats supported by [libsndfile](http://www.mega-nerd.com/libsndfile/) should in theory work for this application.
-
-##### User Interface
-
-![](resources/other/SynthesizedConvolutionReverbGUI_2.jpg)
 
 ###### Frequency Graph
 
